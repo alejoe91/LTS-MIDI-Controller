@@ -1,0 +1,24 @@
+MIDI Spec
+Responds to MIDI Channel 4 (hardcoded – can’t be changed)
+
+CC3 Looper 1 Rec/Dub/Start
+CC9 Looper 1 Stop
+CC14 Looper 1 Clear
+CC15 Looper 1 Level
+CC20 Looper 1 Hold to Store
+CC21 Looper 1 Clear Backtrack
+CC22 Looper 2 Rec/Dub/Start
+CC23 Looper 2 Stop
+CC24 Looper 2 Clear
+CC25 Looper 2 Level
+CC26 Looper 2 Hold to Store
+CC27 Looper 2 Clear Backtrack
+CC28 Decay “Level”
+CC29 All Loops Stop
+CC30 All Loops Clear
+CC31 FX On/Off
+CC85 Parallel/Serial Toggle
+
+the FX respond to Prg change message 1 to 7
+
+Midi CC commands/ Prg change messages are programmed into a midi track / clip in your DAW or sequencer (Midi channel 4!)
