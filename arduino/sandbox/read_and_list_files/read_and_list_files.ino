@@ -38,6 +38,7 @@ void setup() {
   while (!Serial) {
     ; // wait for serial port to connect. Needed for native USB port only
   }
+  delay(5000);
 
   Serial.print("Initializing SD card...");
 
