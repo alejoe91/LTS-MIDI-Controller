@@ -12,12 +12,9 @@
 #include <MIDI.h>
 
 #include <SoftwareSerial.h>
-// #include <ArduinoSTL.h>
 
-#define LOOPER_MIDI_RX 9
-#define LOOPER_MIDI_TX 10
-#define SYNTH_MIDI_RX 11
-#define SYNTH_MIDI_TX 12
+#define SYNTH_MIDI_RX 7
+#define SYNTH_MIDI_TX 6
 
 #define midiChannelSynth 3
 #define midiChannelLooper 4
@@ -30,15 +27,6 @@ SoftwareSerial serialSynth = SoftwareSerial(SYNTH_MIDI_RX, SYNTH_MIDI_TX);
 Transport serialMIDISynth(serialSynth);
 MIDI_NAMESPACE::MidiInterface<Transport> MIDI_SYNTH((Transport&)serialMIDISynth);
 
-// // LOOPER
-// SoftwareSerial serialLooper = SoftwareSerial(LOOPER_MIDI_RX, LOOPER_MIDI_TX);
-// Transport serialMIDILooper(serialLooper);
-// MIDI_NAMESPACE::MidiInterface<Transport> MIDI_LOOPER((Transport&)serialMIDILooper);
-
-
-// Simple tutorial on how to receive and send MIDI messages.
-// Here, when receiving any message on channel 4, the Arduino
-// will blink a led and play back a note for 1 second.
 
 #define BEATS_PER_QUARTER 24
 
@@ -67,13 +55,15 @@ MIDI_CREATE_DEFAULT_INSTANCE();
 
 // SD chip select pin for SPI comms.
 // Default SD chip select is the SPI SS pin (10 on Uno, 53 on Mega).
-const uint8_t SD_SELECT = SS;
+// const uint8_t SD_SELECT = SS;
+const uint8_t SD_SELECT = 53;
+
 
 // LED definitions for status and user indicators
-const uint8_t READY_LED = 7;      // when finished
-const uint8_t SMF_ERROR_LED = 6;  // SMF error
-const uint8_t SD_ERROR_LED = 5;   // SD error
-const uint8_t BEAT_LED = 7;       // toggles to the 'beat'
+const uint8_t READY_LED = 43;      // when finished
+const uint8_t SMF_ERROR_LED = 44;  // SMF error
+const uint8_t SD_ERROR_LED = 45;   // SD error
+const uint8_t BEAT_LED = 41;       // toggles to the 'beat'
 
 const uint16_t WAIT_DELAY = 2000; // ms
 
@@ -82,7 +72,7 @@ const uint16_t WAIT_DELAY = 2000; // ms
 // The files in the tune list should be located on the SD card 
 // or an error will occur opening the file and the next in the 
 // list will be opened (skips errors).
-const char *tuneFolder = {"Bliss"};
+const char *tuneFolder = {"KnightsOfCydonia"};
 const char *tuneList[] = {"synth.mid"};
 
 SDFAT	SD;
@@ -196,7 +186,7 @@ void setup(void)
   while (!Serial) {};
 
   #if USE_MIDI
-    MIDI.begin(MIDI_CHANNEL_OMNI);
+    MIDI_SYNTH.begin();
   #endif
 
   Serial.println("\n[MidiFile Play List]");
@@ -205,6 +195,7 @@ void setup(void)
   if (!SD.begin(SD_SELECT, SPI_FULL_SPEED))
   {
     DEBUGS("\nSD init fail!");
+    Serial.println("Error initializing SD card");
     digitalWrite(SD_ERROR_LED, HIGH);
     while (true) ;
   }
@@ -304,9 +295,9 @@ void loop(void)
       // Serial.println("Get next event");
       if (SMF.getNextEvent())
       {
-        Serial.println("Process next event");
+        // Serial.println("Process next event");
         tickMetronome();
-        Serial.println("Done");
+        // Serial.println("Done");
       }
         
     }

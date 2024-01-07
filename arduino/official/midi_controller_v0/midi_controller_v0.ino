@@ -19,23 +19,38 @@ Maybe buy Arduino 2 or Mega?
 #include <EncoderButton.h>
 #include <LiquidCrystal_I2C.h>
 #include <MIDI.h>
+#include <MD_MIDIFile.h>
 #include <SoftwareSerial.h>
 
 // Use these for optional defines
-#define SYNTH 0
-#define LOOPER 0
+#define MIDRO 1
+#define SYNTH 1
+#define LOOPER 1
 
-#if SYNTH
-  #define midiChannelSynth 3
-  #define SYNTH_MIDI_RX 11
-  #define SYNTH_MIDI_TX 12
+#if MIDRO
+  #define MIDRO_MIDI_RX 12
+  #define MIDRO_MIDI_TX 11
 #endif
 
 #if LOOPER
   #define midiChannelLooper 4
-  #define LOOPER_MIDI_RX 9
-  #define LOOPER_MIDI_TX 10
+  // #define LOOPER_MIDI_RX 10
+  // #define LOOPER_MIDI_TX 9
+  #define LOOPER_MIDI_RX 5
+  #define LOOPER_MIDI_TX 4
 #endif
+
+#if SYNTH
+  #define midiChannelSynth 3
+  // #define SYNTH_MIDI_RX 8
+  // #define SYNTH_MIDI_TX 7
+  #define SYNTH_MIDI_RX 7
+  #define SYNTH_MIDI_TX 6
+#endif
+
+
+
+#define TICKS_PER_QUARTER_CLK 24
 
 //------------------------------------------------------------------------------
 // SD Card configuration
@@ -44,16 +59,16 @@ Maybe buy Arduino 2 or Mega?
 // Try max SPI clock for an SD. Reduce SPI_CLOCK if errors occur.
 #define SPI_CLOCK SD_SCK_MHZ(50)
 
-// // Try to select the best SD card configuration.
-#if HAS_SDIO_CLASS
-#define SD_CONFIG SdioConfig(FIFO_SDIO)
-#elif ENABLE_DEDICATED_SPI
-#define SD_CONFIG SdSpiConfig(SD_CS_PIN, DEDICATED_SPI, SPI_CLOCK)
-#else  // HAS_SDIO_CLASS
-#define SD_CONFIG SdSpiConfig(SD_CS_PIN, SHARED_SPI, SPI_CLOCK)
-#endif  // HAS_SDIO_CLASS
+// // // Try to select the best SD card configuration.
+// #if HAS_SDIO_CLASS
+// #define SD_CONFIG SdioConfig(FIFO_SDIO)
+// #elif ENABLE_DEDICATED_SPI
+// #define SD_CONFIG SdSpiConfig(SD_CS_PIN, DEDICATED_SPI, SPI_CLOCK)
+// #else  // HAS_SDIO_CLASS
+// #define SD_CONFIG SdSpiConfig(SD_CS_PIN, SHARED_SPI, SPI_CLOCK)
+// #endif  // HAS_SDIO_CLASS
 
-const uint8_t SD_CS_PIN = 4;
+const uint8_t SD_CS_PIN = 2;
 
 //-----------------------------------------------------------------------------
 // Program variables
@@ -87,18 +102,30 @@ const uint8_t numSongsDisplayed = 4;
 // Synth commands can be: P (Play) or S (Stop)
 // E.g. 33-129-P --> Play Preset 129 at beat 33 OR 127-0-S --> Stop at beat 127 (the second entry is ignored)
 #if SYNTH
+  #define ADVANCE_PLAY 2
+  #define ADVANCE_PRESET 4
+
   uint16_t synthBeats[20] = {0};
   uint16_t synthPresets[20] = {0};
   char synthCmds[20][2] = {""};
   uint8_t numSynthCmds = 0;
   uint8_t lastSynthCmdIndex = 0;
   uint16_t currentProgram = 0;
+  bool hasMidiFile = false;
+  bool startMidi = false;
+
+  uint16_t ticksPerQuarterMidi = 0;
+  uint8_t numTracks = 0;
+
+  MD_MIDIFile SMF;
+  uint8_t note, velocity, channel;
+  int tickMultiplier;
 #endif
 
 // clock count
-// uint16_t estimatedBPM = 0;
-// long elapsedClockTime;
-// long previousClockTime;
+uint16_t estimatedBPM = 0;
+long elapsedClockTime;
+long previousClockTime;
 long timeLedIdleOn = 0;
 long timeLedSongOn = 0;
 bool isLedIdleOn = false;
@@ -107,7 +134,8 @@ const uint8_t ledDurationMs = 100;
 
 bool songStarted = false;
 bool printedStart = false;
-uint8_t ticksCount = 0; // 0-24 ticks
+uint8_t ticksCount = 0; // 0-TICKS_PER_QUARTER_CLK ticks
+uint8_t previousTicksCount = 0; // 0-TICKS_PER_QUARTER_CLK ticks
 uint8_t currentPreQuarter = 0;
 uint16_t currentSongQuarter = 0;
 uint16_t waitForQuarters = 8;
@@ -115,11 +143,11 @@ uint16_t fakeSongLen = 8;
 
 //------------------------------------------------------------------------------
 // LCD configuration
-const int pinInput1 = A0;  
-const int pinInput2 = A1;
-const int pinButton = 5;
+const int encPinInput1 = A8;  
+const int encPinInput2 = A9;
+const int encPinButton = 3;
 
-EncoderButton myEnc(pinInput1, pinInput2, pinButton);
+EncoderButton myEnc(encPinInput1, encPinInput2, encPinButton);
 LiquidCrystal_I2C lcd(0x27,20,4);
 
 bool lcdIsOn = true;
@@ -127,6 +155,13 @@ bool lcdIsOn = true;
 //------------------------------------------------------------------------------
 // MIDI configuration
 using Transport = MIDI_NAMESPACE::SerialMIDI<SoftwareSerial>;
+
+// MIDRONOME
+#if MIDRO
+  SoftwareSerial serialMidro = SoftwareSerial(MIDRO_MIDI_RX, MIDRO_MIDI_TX);
+  Transport serialMIDIMidro(serialMidro);
+  MIDI_NAMESPACE::MidiInterface<Transport> MIDI_MIDRO((Transport&)serialMIDIMidro);
+#endif
 
 // SYNTH
 #if SYNTH
@@ -142,11 +177,11 @@ using Transport = MIDI_NAMESPACE::SerialMIDI<SoftwareSerial>;
   MIDI_NAMESPACE::MidiInterface<Transport> MIDI_LOOPER((Transport&)serialMIDILooper);
 #endif
 
-// MIDRONOME - MIDI default RX, TX
-MIDI_CREATE_DEFAULT_INSTANCE();
+// // MIDRONOME - MIDI default RX, TX
+// MIDI_CREATE_DEFAULT_INSTANCE();
 
-const uint8_t beatIdleLed = 6;
-const uint8_t beatSongLed = 7;
+const uint8_t beatIdleLed = 43;
+const uint8_t beatSongLed = 42;
 
 //----------------------------------------
 // Data loading
@@ -194,7 +229,7 @@ void loadSongList(){
   // Open root directory
   if (!rootDir.open("/")) 
   {
-    //Serial.println("Root dir open failed");
+    Serial.println("Root dir open failed");
   }
   else
   {
@@ -229,12 +264,6 @@ void displaySongs()
 {
   // delete cursors
   lcd.clear();
-  // Serial.print("Current pre: ");
-  // Serial.print(currentSong);
-  // Serial.print(" - First pre: ");
-  // Serial.print(firstSongDisplayed);
-  // Serial.print(" - Last pre: ");
-  // Serial.println(lastSongDisplayed);
   if (currentSong < 0)
   {
     // Serial.println("Current song negative");
@@ -262,13 +291,6 @@ void displaySongs()
     lastSongDisplayed = firstSongDisplayed + numSongsDisplayed - 1;
   }
 
-  Serial.print("Current post: ");
-  Serial.print(currentSong);
-  Serial.print(" - First post: ");
-  Serial.print(firstSongDisplayed);
-  Serial.print(" - Last post: ");
-  Serial.println(lastSongDisplayed);
-
   // Display titles
   for (int row=firstSongDisplayed; row<=lastSongDisplayed; row++)
   {
@@ -282,6 +304,49 @@ void displaySongs()
   lcd.print(">");
 }
 
+void displayOnWait()
+{
+  if (currentPreQuarter == 1)
+  {
+    lcd.clear();
+    lcd.setCursor(2, 0);
+    lcd.print(songList[currentSong]);
+    lcd.setCursor(2, 2);
+    lcd.print("Starting in ");
+  }
+  lcd.setCursor(15, 2);
+  lcd.print(waitForQuarters - currentPreQuarter);
+}
+
+void displayOnPlay()
+{
+  lcd.setCursor(2, 2);
+  lcd.print("              ");
+  lcd.setCursor(2, 2);
+  lcd.print("Playing!");
+
+  #if LOOPER
+  if (numLooperCmds > 0)
+  {
+    lcd.setCursor(3, 3);
+    lcd.print("L");
+  }
+  #endif
+
+  #if SYNTH
+  if (numSynthCmds > 0)
+  {
+    lcd.setCursor(9, 3);
+    lcd.print("S");
+  }
+  if (hasMidiFile)
+  {
+    lcd.setCursor(15, 3);
+    lcd.print("M");
+  }
+  #endif
+}
+
 void loadSong(const char* songName){
   if (!rootDir.open("/")) {
     Serial.println("Root open failed");
@@ -290,7 +355,10 @@ void loadSong(const char* songName){
   {
     File file;
     Serial.print("Opening song ");
-    Serial.println(songName);
+    Serial.print(currentSong + 1);
+    Serial.print(" ");
+    Serial.print(songName);
+    Serial.print("...");
 
     if (!(songDir.open(&rootDir, songName, O_RDONLY)))
     {
@@ -366,7 +434,6 @@ void loadSong(const char* songName){
         char currentChar[2];
         uint16_t currentBeat = 0;
 
-        // TODO fix this!
         int data;
         if (file.fileSize() > 0)
         {
@@ -415,6 +482,81 @@ void loadSong(const char* songName){
         numSynthCmds = currentBeat;
         file.close();
       }
+
+      // try to load MIDI file
+      hasMidiFile = false;
+
+      // Restart SMF object
+      SMF.close();
+      // SMF.begin(&sd);
+
+      char midiFileName[50];
+      midiFileName[0] = '\0';
+      strcat(midiFileName, songName);
+      strcat(midiFileName, "/");
+      strcat(midiFileName, "synth.mid");
+
+      int err = SMF.load(midiFileName);
+
+      if (err == MD_MIDIFile::E_OK)
+      {
+        hasMidiFile = true;
+        Serial.println("MIDI loaded!\n");
+        Serial.print("\tNum. tracks: ");
+        numTracks = SMF.getTrackCount();
+        Serial.println(numTracks);
+        Serial.print("\tTicks per quarter note: ");
+        ticksPerQuarterMidi = SMF.getTicksPerQuarterNote();
+        Serial.println(ticksPerQuarterMidi);
+        Serial.print("\tTick multiplier: ");
+        tickMultiplier = int(ticksPerQuarterMidi / TICKS_PER_QUARTER_CLK);
+        Serial.println(tickMultiplier);
+      }
+
+
+
+      // if (file.open(&songDir, "synth.mid", O_RDONLY))
+      // {
+      //   if (file.fileSize() > 0)
+      //   {
+      //     file.close();
+
+      //     char fullFileName[50];
+      //     fullFileName[0] = '\0';
+      //     strcat(fullFileName, songName);
+      //     strcat(fullFileName, "/");
+      //     strcat(fullFileName, "synth.mid");
+
+      //     hasMidiFile = true;
+
+      //     Serial.println(fullFileName);
+          
+      //     // SMF.setFileFolder(songName);
+      //     // int err = SMF.load("synth.mid");
+      //     int err = SMF.load(fullFileName);
+
+      //     if (err != MD_MIDIFile::E_OK)
+      //     {
+      //       // timeStart = millis();
+      //       Serial.print("Error Loading ");
+      //       Serial.println(err);
+      //     }
+      //     else
+      //     {
+      //       Serial.println("MIDI loaded!\n");
+      //       Serial.print("\tNum. tracks: ");
+      //       numTracks = SMF.getTrackCount();
+      //       Serial.println(numTracks);
+      //       Serial.print("\tTicks per quarter note: ");
+      //       ticksPerQuarterMidi = SMF.getTicksPerQuarterNote();
+      //       Serial.println(ticksPerQuarterMidi);
+      //       Serial.print("\tTick multiplier: ");
+      //       tickMultiplier = int(ticksPerQuarterMidi / TICKS_PER_QUARTER_CLK);
+      //       Serial.println(tickMultiplier);
+      //     }
+      //   }
+      // }
+
     #endif
     songDir.close();
     Serial.println("Song loaded!");
@@ -429,8 +571,10 @@ void loadSong(const char* songName){
   void synthChangeProgram(int programNumber)
   {
     int bankMSB, bankLSB;
-    bankMSB = programNumber / 127;
-    bankLSB = programNumber % 127;
+    bankMSB = programNumber / 128;
+    bankLSB = programNumber % 128;
+    Serial.print("\tProg. Change: ");
+    Serial.println(programNumber);
 
     MIDI_SYNTH.sendControlChange(0, bankMSB, midiChannelSynth);
     MIDI_SYNTH.sendProgramChange(bankLSB, midiChannelSynth);
@@ -479,14 +623,26 @@ void loadSong(const char* songName){
 void songFinished()
 {
   #if SYNTH
+    MIDI_SYNTH.sendStop();
     synthStopAll();
+    lastSynthCmdIndex = 0;
+    if (hasMidiFile)
+      SMF.close();
+    hasMidiFile = false;
+    startMidi = false;
   #endif
   #if LOOPER
     looperStopAll();
     looperClearAll();
+    lastLooperCmdIndex = 0;
   #endif
   Serial.println("Song finished");
-  state = S_SONG_LOADED;
+  state = S_LOAD;
+  currentSongQuarter = 0;
+  currentPreQuarter = 0;
+  currentSong++;
+  currentSong = currentSong % numSongs;
+  displaySongs();
 }
 
 
@@ -494,7 +650,9 @@ void songFinished()
 // Handles
 void handleClock()
 {
-  // TODO check if start comes before or after clock (in case move at the end)
+
+  ticksCount++;
+  // Propagate clock
   #if SYNTH
     MIDI_SYNTH.sendClock();
   #endif
@@ -502,15 +660,111 @@ void handleClock()
     MIDI_LOOPER.sendClock();
   #endif
 
-  ticksCount++;
-
-  if (ticksCount == 24)
+  // Change preset 8 ticks before Play
+  if (ticksCount == TICKS_PER_QUARTER_CLK - ADVANCE_PRESET)
   {
-    // elapsedClockTime = millis() - previousClockTime;
-    // previousClockTime = millis();
+    if (state == S_PLAYING)
+    {
+        #if SYNTH
+        for (int i=lastSynthCmdIndex; i<numSynthCmds; i++)
+          {
+            if (synthBeats[i] == currentSongQuarter + 1)
+            {
+              uint16_t changeProgram = synthPresets[i] - 1; //0--based
+
+              if (strcmp(synthCmds[i], "P") == 0) // Change program and play
+              {
+                Serial.print("Changing preset before Play -  ");
+                Serial.println(synthPresets[i]);
+
+                if (currentProgram != changeProgram)
+                {
+                  synthChangeProgram(changeProgram);
+                  currentProgram = changeProgram;
+                }
+              }
+              else if (strcmp(synthCmds[i], "C") == 0) // Stop
+              {
+                if (currentProgram != changeProgram)
+                {
+                  Serial.println("Change preset the actual clock");
+                  synthChangeProgram(changeProgram);
+                  currentProgram = changeProgram;
+                }
+              }
+            }
+            else if (synthBeats[i] > currentSongQuarter + 1)
+              break;
+          }
+        #endif
+      }
+    }
+    // send play a couple of ticks before actual Quarter
+    else if (ticksCount == TICKS_PER_QUARTER_CLK - ADVANCE_PLAY)
+    {
+      if (state == S_PLAYING)
+      {
+        #if SYNTH
+          for (int i=lastSynthCmdIndex; i<numSynthCmds; i++)
+          {
+            if (synthBeats[i] == currentSongQuarter + 1)
+            {
+              if (strcmp(synthCmds[i], "P") == 0) // Change program and play
+              {
+                Serial.println("Sending Play before Play");
+                MIDI_SYNTH.sendStart();
+              }
+              else if (strcmp(synthCmds[i], "S") == 0) // Stop
+              {
+                Serial.println("Stop before the actual clock");
+                MIDI_SYNTH.sendStop();
+              }
+            }
+            else if (synthBeats[i] > currentSongQuarter + 1)
+              break;
+          }
+        #endif
+        #if LOOPER
+          for (int i=lastLooperCmdIndex; i<numLooperCmds; i++)
+          {
+            if (looperBeats[i] == currentSongQuarter + 1)
+            {
+              // These looper commands are sent ADVANCE_PLAY ticks before the actual quarter
+              if (strcmp(looperCmds[i], "R1") == 0) // Rec/Play/Dub 1
+              {
+                looperRecPlay1();
+              }
+              else if (strcmp(looperCmds[i], "R2") == 0) // Rec/Play/Dub 1
+              {
+                looperRecPlay2();
+              }
+              else if (strcmp(looperCmds[i], "S1") == 0) // Stop 1
+              {
+                looperStop1();
+              }
+              else if (strcmp(looperCmds[i], "S2") == 0) // Stop2
+              {
+                looperStop2();
+              }
+              else if (strcmp(looperCmds[i], "SA") == 0) // Stop All
+              {
+                looperStopAll();
+              }
+            }
+            else if (looperBeats[i] > currentSongQuarter + 1)
+              break;
+          }
+        #endif
+      }
+    }
+
+  if (ticksCount == TICKS_PER_QUARTER_CLK)
+  {
+    elapsedClockTime = millis() - previousClockTime;
+    previousClockTime = millis();
     //Serial.print("Clock received - time from previous: ");
     //Serial.print(elapsedClockTime);
-    // estimatedBPM = int(60 / (float(elapsedClockTime) / 1000.));
+    estimatedBPM = int(60 / (float(elapsedClockTime) / 1000.));
     //Serial.print(" ms. Estimated BPM = ");
     //Serial.print(estimatedBPM);
     if (state == S_PLAYING)
@@ -529,49 +783,46 @@ void handleClock()
     ticksCount = 0;
     if (state == S_WAIT_TO_START)
     {
-      // Serial.print(" Current Quarter PRE = ");
-      // Serial.println(currentPreQuarter);
       currentPreQuarter++;
+      Serial.print("\tStart in... ");
+      Serial.println(waitForQuarters - currentPreQuarter);
+      displayOnWait();
     }
     else if (state == S_PLAYING)
     {
-      //Serial.print(" Current Quarter SONG = ");
-      //Serial.println(currentSongQuarter);
+      // Serial.print("\tSong at... ");
+      // Serial.println(currentSongQuarter);
+      if (hasMidiFile)
+      {
+        startMidi = true;
+        previousTicksCount = TICKS_PER_QUARTER_CLK - 1;
+      }
       currentSongQuarter++;
       #if SYNTH
         for (int i=lastSynthCmdIndex; i<numSynthCmds; i++)
         {
           if (synthBeats[i] == currentSongQuarter)
           {
-            Serial.print("Scmd @: ");
+            Serial.print("Synth CMD at: ");
             Serial.print(synthBeats[i]);
 
             if (strcmp(synthCmds[i], "P") == 0) // Change program and play
             {
-              // Serial.print("Play -  ");
-              // Serial.println(synthPresets[i]);
-              MIDI_SYNTH.sendStop();
-              if (currentProgram != synthPresets[i])
-              {
-                synthChangeProgram(synthPresets[i]);
-                currentProgram = synthPresets[i];
-              }
-              MIDI_SYNTH.sendStart();
+              Serial.print(" Play -  ");
+              Serial.println(synthPresets[i]);
+              // Program change is handled ADVANCE_PRESET ticks in advance previous tick
+              // Start is sent ADVANCE_PLAY ticks in advance
             }
             else if (strcmp(synthCmds[i], "C") == 0) // Change program 
             {
-              // Serial.print("Change -  ");
-              // Serial.println(synthPresets[i]);
-              if (currentProgram != synthPresets[i])
-              {
-                synthChangeProgram(synthPresets[i]);
-                currentProgram = synthPresets[i];
-              }
+              // Change preset is sent ADVANCE_PLAY ticks in advance
+              Serial.print(" Change -  ");
+              Serial.println(synthPresets[i]);
             }
             else if (strcmp(synthCmds[i], "S") == 0) // Stop
             {
-              // Serial.println("Stop");
-              MIDI_SYNTH.sendStop();
+              // Stop is sent ADVANCE_PLAY ticks in advance
+              Serial.println(" Stop!");
             }
           }
           else if (synthBeats[i] > currentSongQuarter)
@@ -586,40 +837,51 @@ void handleClock()
         {
           if (looperBeats[i] == currentSongQuarter)
           {
+            Serial.print("Looper CMD at: ");
+            Serial.print(looperBeats[i]);
             if (strcmp(looperCmds[i], "R1") == 0) // Rec/Play/Dub 1
             {
-              looperRecPlay1();
+              Serial.println(" Rec/Play/Dub 1");
+              // looperRecPlay1();
             }
             else if (strcmp(looperCmds[i], "R2") == 0) // Rec/Play/Dub 1
             {
-              looperRecPlay2();
+              Serial.println(" Rec/Play/Dub 2");
+              // looperRecPlay2();
             }
             else if (strcmp(looperCmds[i], "S1") == 0) // Stop 1
             {
-              looperStop1();
+              Serial.println(" Stop 1");
+              // looperStop1();
             }
             else if (strcmp(looperCmds[i], "S2") == 0) // Stop2
             {
-              looperStop2();
+              Serial.println(" Stop 2");
+              // looperStop2();
             }
             else if (strcmp(looperCmds[i], "C1") == 0) // Clear 1
             {
+              Serial.println(" Clear 1");
               looperClear1();
             }
             else if (strcmp(looperCmds[i], "C2") == 0) // Clear 2
             {
+              Serial.println(" Clear 2");
               looperClear2();
             }
             else if (strcmp(looperCmds[i], "SA") == 0) // Stop All
             {
-              looperStopAll();
+              Serial.println(" Stop all");
+              // looperStopAll();
             }
             else if (strcmp(looperCmds[i], "CA") == 0) // Clear All
             {
+              Serial.println(" Clear all");
               looperClearAll();
             }
             else if (strcmp(looperCmds[i], "PS") == 0) // Parallel/Serial Toggle
             {
+              Serial.println(" Paralllel / Serial toggle");
               looperParallelSerial();
             }
           }
@@ -633,7 +895,10 @@ void handleClock()
       #if SYNTH && LOOPER
         if ((currentSongQuarter > looperBeats[numLooperCmds - 1]) && (currentSongQuarter > synthBeats[numSynthCmds - 1]))
         {
-          songFinished();
+          if (!hasMidiFile)
+            songFinished();
+          else if (SMF.isEOF())
+            songFinished();
         }
       #elif SYNTH
         if (currentSongQuarter > synthBeats[numSynthCmds - 1])
@@ -657,6 +922,8 @@ void handleClock()
 
 void handleStart()
 {
+  // Reset click count!
+  ticksCount = 0;
   // The start makes the program start counting
   if (state == S_SONG_LOADED)
   {
@@ -669,33 +936,99 @@ void handleStart()
 void handleStop()
 {
   #if SYNTH
+    MIDI_SYNTH.sendStop();
     synthStopAll();
+    lastSynthCmdIndex = 0;
+    if (hasMidiFile)
+      SMF.close();
+    hasMidiFile = false;
+    startMidi = false;
   #endif
   #if LOOPER
     looperStopAll();
     looperClearAll();
+    lastLooperCmdIndex = 0;
   #endif
   Serial.println("Stop! Reset");
+  digitalWrite(beatSongLed, LOW);
   state = S_LOAD;
   currentPreQuarter = 0;
   currentSongQuarter = 0;
+  displaySongs();
 }
+
+//---------------------------------------------------------
+// MIDI file functions
+uint16_t tickClock(void)
+// Return number of ticks since last call 
+{
+  int16_t ticks = ticksCount - previousTicksCount;
+  if (ticks < 0)
+    // Take care of negative values
+    ticks = TICKS_PER_QUARTER_CLK + ticks;
+  ticks = ticks * tickMultiplier;
+  previousTicksCount = ticksCount;
+
+  return ticks;
+}
+
+
+void midiCallback(midi_event *pev)
+// Only handles NOTE ON and NOTE OFF
+{
+  if (pev->data[0] == 0x80)
+  {
+    // send note On
+    note = pev->data[1];
+    velocity = pev->data[2];
+    channel = pev->channel + 1;
+    // Serial.print("Note ");
+    // Serial.print(note);
+    // Serial.print(" - Velocity ");
+    // Serial.print(velocity);
+    // Serial.print(" - Channel ");
+    // Serial.print(channel);
+
+    #if SYNTH
+      MIDI_SYNTH.sendNoteOn(note, velocity, midiChannelSynth);
+    #endif
+  }
+  else if (pev->data[0] == 0x90)
+  {
+    // send note Off
+    note = pev->data[1];
+    velocity = pev->data[2];
+    channel = pev->channel + 1;
+
+    #if SYNTH
+      MIDI_SYNTH.sendNoteOff(note, velocity, midiChannelSynth);
+    #endif
+  }
+}
+
+void sysexCallback(sysex_event *pev){}
+
+
 
 
 void setup()
 {
-  // Serial.begin(9600);
-  // while (! Serial) {}
+  Serial.begin(9600);
+  while (! Serial) {}
   delay(1000);
+  Serial.println("Initializing");
+
 
   pinMode(beatIdleLed, OUTPUT);
   pinMode(beatSongLed, OUTPUT);
 
-  // Initialize MIDI.
-  MIDI.begin(MIDI_CHANNEL_OMNI);
-  MIDI.setHandleClock(handleClock);
-  MIDI.setHandleStart(handleStart);
-  MIDI.setHandleStop(handleStop);
+  // Initialize MIDI
+  #if MIDRO
+    MIDI_MIDRO.begin(MIDI_CHANNEL_OMNI);
+    MIDI_MIDRO.setHandleClock(handleClock);
+    MIDI_MIDRO.setHandleStart(handleStart);
+    MIDI_MIDRO.setHandleStop(handleStop);
+  #endif
 
   #if LOOPER
     MIDI_LOOPER.begin();
@@ -712,25 +1045,27 @@ void setup()
   myEnc.setEncoderHandler(onEncoder);
 
   // Initialize the SD and load files
-  if (!sd.begin(SD_CONFIG)) {
+  //if (!sd.begin(SD_CONFIG)) {
+  if (!sd.begin(SD_CS_PIN, SPI_FULL_SPEED))
+  {
+    Serial.println("Error initializing SD card");
     sd.initErrorHalt(&Serial);
   }
+
+  #if SYNTH
+    // Initialize MIDIFile
+    SMF.begin(&sd);
+    SMF.setMidiHandler(midiCallback);
+    SMF.setSysexHandler(sysexCallback);
+  #endif
 
   // Load songs
   loadSongList();
 
   if (numSongs > 0)
-  {
-    // Serial.println("");
-    // Serial.print("Songs loaded! Found ");
-    // Serial.print(numSongs);
-    // Serial.println(" songs.");
     displaySongs();
-  }
   else
-  {
-    // Serial.println("Failed to load songs");
-  }
+    Serial.println("Failed to load songs");
     
 }
 
@@ -749,7 +1084,9 @@ void loop()
     isLedSongOn = false;
   }
   // Read MIDI
-  if (MIDI.read()){}
+  #if MIDRO
+    if (MIDI_MIDRO.read()){}
+  #endif
 
   switch (state)
   {
@@ -764,16 +1101,30 @@ void loop()
       break;
 
     case S_WAIT_TO_START:
-      if (currentPreQuarter >= waitForQuarters)
+      // why? 
+      if (currentPreQuarter >= waitForQuarters - 1)
       {
         //Serial.print(currentPreQuarter);
         Serial.println("Play");
         state = S_PLAYING;
         currentPreQuarter = 0;
         digitalWrite(beatSongLed, LOW);
+        displayOnPlay();
       }
       break;
     case S_PLAYING:
+      #if SYNTH
+      if (hasMidiFile && startMidi)
+      {
+        uint32_t ticks = tickClock();
+        if (ticks > 0)
+        {
+          Serial.println(ticks);
+          SMF.processEvents(ticks);
+          SMF.isEOF();
+        }
+      }
+      #endif
       // Here we have to control the synth and the looper based on the currentSongQuarter (or play the MIDI file)
       break;
   }

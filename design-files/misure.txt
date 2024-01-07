@@ -1,0 +1,12 @@
+bottom left: -13.5, -8
+bottom right: 110.5,-8
+top left: -13.5, 76
+top right: 110.5, 76
+
+width: 110.5 + 13.5 = 124
+length: 76 + 8 = 84
+height bottom:
+height top:
+
+holes:
+

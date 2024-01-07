@@ -15,11 +15,36 @@
 // Here, when receiving any message on channel 4, the Arduino
 // will blink a led and play back a note for 1 second.
 
-#define BEATS_PER_QUARTER 24
+#include <SoftwareSerial.h>
+
+#define MIDRO_MIDI_RX 12
+#define MIDRO_MIDI_TX 11
+
+#define SYNTH_MIDI_RX 7
+#define SYNTH_MIDI_TX 6
+
+#define midiChannelSynth 3
+#define midiChannelLooper 4
+
+
+using Transport = MIDI_NAMESPACE::SerialMIDI<SoftwareSerial>;
+
+SoftwareSerial serialMidro = SoftwareSerial(MIDRO_MIDI_RX, MIDRO_MIDI_TX);
+Transport serialMIDIMidro(serialMidro);
+MIDI_NAMESPACE::MidiInterface<Transport> MIDI_MIDRO((Transport&)serialMIDIMidro);
+
+// SYNTH
+SoftwareSerial serialSynth = SoftwareSerial(SYNTH_MIDI_RX, SYNTH_MIDI_TX);
+Transport serialMIDISynth(serialSynth);
+MIDI_NAMESPACE::MidiInterface<Transport> MIDI_SYNTH((Transport&)serialMIDISynth);
+
+
+#define TICKS_PER_QUARTER_CLOCK 24
 
 const int inChannelSynth = 3;
+
 uint8_t lclBPM = 120;
-uint8_t ticks;
+uint32_t ticks;
 
 
 #define USE_MIDI  1   // set to 1 to enable MIDI output, otherwise debug output
@@ -30,7 +55,7 @@ uint8_t ticks;
 #define DEBUGX(s, x)
 #define DEBUGS(s)
 #define SERIAL_RATE 31250
-MIDI_CREATE_DEFAULT_INSTANCE();
+// MIDI_CREATE_DEFAULT_INSTANCE();
 
 #else // don't use MIDI to allow printing debug statements
 
@@ -44,13 +69,13 @@ MIDI_CREATE_DEFAULT_INSTANCE();
 
 // SD chip select pin for SPI comms.
 // Default SD chip select is the SPI SS pin (10 on Uno, 53 on Mega).
-const uint8_t SD_SELECT = SS;
+const uint8_t SD_SELECT = 2;
 
 // LED definitions for status and user indicators
-const uint8_t READY_LED = 7;      // when finished
-const uint8_t SMF_ERROR_LED = 6;  // SMF error
-const uint8_t SD_ERROR_LED = 5;   // SD error
-const uint8_t BEAT_LED = 9;       // toggles to the 'beat'
+const uint8_t READY_LED = 42;      // when finished
+const uint8_t SMF_ERROR_LED = 44;  // SMF error
+const uint8_t SD_ERROR_LED = 45;   // SD error
+const uint8_t BEAT_LED = 43;       // toggles to the 'beat'
 
 const uint16_t WAIT_DELAY = 2000; // ms
 
@@ -59,7 +84,7 @@ const uint16_t WAIT_DELAY = 2000; // ms
 // The files in the tune list should be located on the SD card 
 // or an error will occur opening the file and the next in the 
 // list will be opened (skips errors).
-const char tuneFolder[] = {"Always"};
+const char tuneFolder[] = {"Bliss"};
 const char *tuneList[] = {"synth.mid"};
 // {
 //   "LOOPDEMO.MID",  // simplest and shortest file
@@ -92,8 +117,6 @@ const char *tuneList[] = {"synth.mid"};
 SDFAT	SD;
 MD_MIDIFile SMF;
 
-const int ExternalTicksPerQuarterNote = 24;
-
 int note;
 int velocity;
 int channel;
@@ -102,38 +125,38 @@ int channel;
 int estimatedBPM = 0;
 long elapsedClockTime;
 long previousClockTime;
+int ticksPerQuarterMidi = 0;
+int tickMultiplier;
 
 long timeLedOn = 0;
-int LED = 9;
-uint16_t clockCount = 0;
+uint16_t tickCount = 0;
+uint16_t previousTickCount = 0;
+uint32_t tickTimeMicros = 0;
+
 
 bool isLedOn = false;
 int ledDurationMs = 100;
 int waitForStart = 8;
 int currentQuarter = 0;
 
-static uint32_t lastTickCheckTime, lastTickError;
-// uint8_t   ticks = 0;
-
 void handleClock(){
-    clockCount++;
-    ticks = clockCount;
+    tickCount++;
 
-    if (clockCount == 24)
+    if (tickCount == TICKS_PER_QUARTER_CLOCK)
     {
       elapsedClockTime = millis() - previousClockTime;
       previousClockTime = millis();
-      Serial.print("Clock received - time from previous: ");
-      Serial.print(elapsedClockTime);
+      // Serial.print("Clock received - time from previous: ");
+      // Serial.println(elapsedClockTime);
       estimatedBPM = int(60 / (float(elapsedClockTime) / 1000.));
       // Serial.print(" ms. Estimated BPM = ");
       // Serial.print(estimatedBPM);
       // Serial.print(" Current position: ");
       // Serial.println(currentQuarter);
-      digitalWrite(LED, HIGH);
+      digitalWrite(BEAT_LED, HIGH);
       isLedOn = true;
       timeLedOn = millis();
-      clockCount = 0;
+      tickCount = 0;
       currentQuarter++;
     }
 }
@@ -151,6 +174,8 @@ void midiCallback(midi_event *pev)
   // }
   // else
   //   Serial.write(pev->data, pev->size);
+  // Serial.print("MIDI event: ");
+  // Serial.println(pev->data[0]);
   if (pev->data[0] == 0x80)
   {
     // send not On
@@ -158,13 +183,15 @@ void midiCallback(midi_event *pev)
     velocity = pev->data[2];
     channel = pev->channel + 1;
 
-    // Serial.print("note on  - channel ");
+    // Serial.println("note on  - channel ");
     // Serial.print(channel);
     // Serial.print(" note ");
     // Serial.print(note);
     // Serial.print(" velocity ");
     // Serial.println(velocity); 
-    MIDI.sendNoteOn(note, velocity, channel);    
+    MIDI_SYNTH.sendNoteOn(note, velocity, inChannelSynth);   
+    // MIDI_SYNTH.sendNoteOn(note, velocity, channel);   
+     
   }
   else if (pev->data[0] == 0x90)
   {
@@ -174,13 +201,13 @@ void midiCallback(midi_event *pev)
     velocity = pev->data[2];
     channel = pev->channel + 1;
 
-    // Serial.print("note off - channel ");
+    // Serial.println("note off - channel ");
     // Serial.print(channel);
     // Serial.print(" note ");
     // Serial.print(note);
     // Serial.print(" velocity ");
     // Serial.println(velocity);
-    MIDI.sendNoteOff(note, velocity, channel);
+    MIDI_SYNTH.sendNoteOff(note, velocity, inChannelSynth);
   }
 #endif
   DEBUG("\n", millis());
@@ -203,38 +230,7 @@ void sysexCallback(sysex_event *pev)
     DEBUGX(" ", pev->data[i]);
 }
 
-void tickMetronome(void)
-// flash a LED to the beat
-{
-  static uint32_t lastBeatTime = 0;
-  static boolean  inBeat = false;
-  uint16_t  beatTime;
 
-  beatTime = 60000/SMF.getTempo();    // msec/beat = ((60sec/min)*(1000 ms/sec))/(beats/min)
-  if (!inBeat)
-  {
-    if ((millis() - lastBeatTime) >= beatTime)
-    {
-      lastBeatTime = millis();
-      digitalWrite(BEAT_LED, HIGH);
-      inBeat = true;
-    }
-  }
-  else
-  {
-    if ((millis() - lastBeatTime) >= 100)	// keep the flash on for 100ms only
-    {
-      digitalWrite(BEAT_LED, LOW);
-      inBeat = false;
-    }
-  }
-}
-
-uint16_t tickClock_old(void)
-// Check if enough time has passed for a MIDI tick and work out how many!
-{
-  return clockCount;
-}
 
 // uint16_t tickClock(void)
 // // Check if enough time has passed for a MIDI tick and work out how many!
@@ -244,6 +240,7 @@ uint16_t tickClock_old(void)
 
 //   uint32_t elapsedTime = lastTickError + micros() - lastTickCheckTime;
 //   uint32_t tickTime = (60 * 1000000L) / (lclBPM * SMF.getTicksPerQuarterNote());  // microseconds per tick
+//   // Serial.println(tickTime);
 //   tickTime = (tickTime * 4) / (SMF.getTimeSignature() & 0xf); // Adjusted for time signature
 
 //   if (elapsedTime >= tickTime)
@@ -255,6 +252,21 @@ uint16_t tickClock_old(void)
 
 //   return(ticks);
 // }
+
+uint16_t tickClock(void)
+// Return number of ticks since last call 
+{
+  int16_t ticks = tickCount - previousTickCount;
+  if (ticks < 0)
+    // Take care of negative values
+    ticks = 24 + ticks;
+  ticks = ticks * tickMultiplier;
+  previousTickCount = tickCount;
+
+  return ticks;
+}
+
+
 
 void midiSilence(void)
 // Turn everything off on every channel.
@@ -300,16 +312,19 @@ void setup(void)
 
 
   #if USE_MIDI
-    MIDI.begin(MIDI_CHANNEL_OMNI);
+    MIDI_MIDRO.begin(MIDI_CHANNEL_OMNI);
+    MIDI_MIDRO.setHandleClock(handleClock);
+    MIDI_SYNTH.begin();
   #endif
 
-  DEBUGS("\n[MidiFile Play List]");
+  // DEBUGS("\n[MidiFile Play List]");
 
   // Initialize SD
   if (!SD.begin(SD_SELECT, SPI_FULL_SPEED))
   {
     DEBUGS("\nSD init fail!");
     digitalWrite(SD_ERROR_LED, HIGH);
+    Serial.println("SD error");
     while (true) ;
   }
 
@@ -318,7 +333,7 @@ void setup(void)
   SMF.setMidiHandler(midiCallback);
   SMF.setSysexHandler(sysexCallback);
 
-  MIDI.setHandleClock(handleClock);
+  MIDI_SYNTH.setHandleClock(handleClock);
 
   digitalWrite(READY_LED, HIGH);
 }
@@ -334,10 +349,10 @@ void loop(void)
 
   if ((isLedOn) && ((millis() - timeLedOn) > ledDurationMs))
     {
-      digitalWrite(LED, LOW);
+      digitalWrite(BEAT_LED, LOW);
       isLedOn = false;
     }
-  if (MIDI.read())                    // If we have received a message
+  if (MIDI_MIDRO.read())                    // If we have received a message
   {
   }
 
@@ -384,13 +399,21 @@ void loop(void)
         Serial.println("S_WAIT_TO_START");
         state = S_WAIT_TO_START;
       }
-      SMF.setTicksPerQuarterNote(BEATS_PER_QUARTER);
+      // SMF.setTicksPerQuarterNote(BEATS_PER_QUARTER);
       Serial.print("Ticks per quarter note: ");
-      Serial.println(SMF.getTicksPerQuarterNote());
+      ticksPerQuarterMidi = SMF.getTicksPerQuarterNote();
+      Serial.println(ticksPerQuarterMidi);
+      Serial.print("Ticks time micros: ");
+      tickTimeMicros = SMF.getTickTime();
+      Serial.println(tickTimeMicros);
+      Serial.print("Tick multiplier: ");
+      tickMultiplier = int(ticksPerQuarterMidi / TICKS_PER_QUARTER_CLOCK);
+      Serial.println(tickMultiplier);
+      
     }
     break;
   case S_WAIT_TO_START:
-    Serial.println("Waiting");
+    // Serial.println("Waiting");
 
     if (currentQuarter >= waitForStart)
     {
@@ -403,12 +426,15 @@ void loop(void)
     DEBUG("\nS_PLAYING ", SMF.isEOF());
     // if (!SMF.isEOF())
     // { 
-    // uint32_t ticks = tickClock();
-    Serial.print("Playing: ticks ");
-    Serial.println(ticks);
+    uint32_t ticks = tickClock();
+    // ticks = int(tickCount * ticksPerQuarterMidi / TICKS_PER_QUARTER_CLOCK);
+    // Serial.println(ticks);
+
 
     if (ticks > 0)
     {
+      // Serial.print("Playing: ticks ");
+      // Serial.println(ticks);
       SMF.processEvents(ticks);  
       SMF.isEOF();
     }

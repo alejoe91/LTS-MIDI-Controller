@@ -1,7 +1,7 @@
 import mido
 from pathlib import Path
 
-def convert_type0_type1(midi_type0_file, output_folder=None):
+def prepare_midi_for_synth(midi_type0_file, output_folder=None):
     type_0 = mido.MidiFile(midi_type0_file)
     if type_0.type != 0:
         return
@@ -49,4 +49,4 @@ if __name__ == "__main__":
     parser.add_argument('input', type=str, help='Input MIDI file')
     parser.add_argument('-o', '--output', type=str, help='Output folder')
     args = parser.parse_args()
-    convert_type0_type1(args.input, args.output)
+    prepare_midi_for_synth(args.input, args.output)

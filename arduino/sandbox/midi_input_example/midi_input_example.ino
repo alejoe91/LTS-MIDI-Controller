@@ -1,17 +1,29 @@
 #include <MIDI.h>
+#include <SoftwareSerial.h>
 
 // Simple tutorial on how to receive and send MIDI messages.
 // Here, when receiving any message on channel 4, the Arduino
 // will blink a led and play back a note for 1 second.
 
-MIDI_CREATE_DEFAULT_INSTANCE();
+#define MIDRO_MIDI_RX 12
+#define MIDRO_MIDI_TX 11
+
+// MIDI configuration
+using Transport = MIDI_NAMESPACE::SerialMIDI<SoftwareSerial>;
+
+// MIDRONOME
+SoftwareSerial serialMidro = SoftwareSerial(MIDRO_MIDI_RX, MIDRO_MIDI_TX);
+Transport serialMIDIMidro(serialMidro);
+MIDI_NAMESPACE::MidiInterface<Transport> MIDI((Transport&)serialMIDIMidro);
+
+
 
 int estimatedBPM = 0;
 long elapsedClockTime;
 long previousClockTime;
 
 long timeLedOn = 0;
-int LED = 9;
+int LED = 42;
 int clockCount = 0;
 
 bool isLedOn = false;
