@@ -39,8 +39,11 @@ OFF: No channel 1 or 2 are played
 #define OUT_MIDI_RX1 5
 #define OUT_MIDI_TX1 4
 
-#define OUT_MIDI_RX2 7
-#define OUT_MIDI_TX2 6
+#define OUT_MIDI_RX2 3
+#define OUT_MIDI_TX2 2
+
+#define OUT_MIDI_RX3 7
+#define OUT_MIDI_TX3 6
 
 #define midiChannelSynthOut 1
 
@@ -85,7 +88,10 @@ const uint8_t numSongsDisplayed = 4;
 
 bool startMidi = false;
 bool acceptingSync = false;
-bool startReceived = false;
+bool start1Received = false;
+bool stop1Received = false;
+bool start2Received = false;
+
 bool midiPlay = true;
 bool isMidronomeConnected = false;
 
@@ -97,6 +103,7 @@ uint8_t numTracks = 0;
 uint16_t midiTempo = 0;
 
 // clock count
+const uint16_t waitForAcceptingSyncMs = 5000;
 uint16_t currentSongTempo = 0;
 uint16_t currentSongSignatureNumerator = 4;
 uint8_t currentBeat = 0;
@@ -187,10 +194,15 @@ void onLongClick(EncoderButton& eb) {
   currentSong = 0;
   state = S_WAIT_FOR_SYNC;
   startingClockTime = millis();
+  start1Received = false;
+  stop1Received = false;
+  start2Received = false;
   acceptingSync = false;
   Serial.println("AcceptingSync set to false");
   digitalWrite(errLed, LOW);
-  displaySongs();
+  lcd.clear();
+  lcd.setCursor(0, 1);
+  lcd.print("Press START1 to SYNC");
 }
 
 // SETTINGS modes - toggle between S_SETTINGS and S_LOAD
@@ -321,13 +333,6 @@ void displayClockMode()
 {
   // Display clock mode
   if (isMidronomeConnected)
-    if (state == S_WAIT_FOR_SYNC)
-    {
-      lcd.clear();
-      lcd.setCursor(0, 2);
-      lcd.print("Press START to SYNC!");
-    }
-    else
     {
       lcd.setCursor(19, 0);
       lcd.print("S");
@@ -596,7 +601,9 @@ void handleClock()
   {
     isMidronomeConnected = true;
     state = S_WAIT_FOR_SYNC;
-    displaySongs();
+    lcd.clear();
+    lcd.setCursor(0, 1);
+    lcd.print("Press START1 to SYNC");
   }
 
   // Propagate clock
@@ -666,21 +673,30 @@ void handleClock()
 
 void handleStart()
 {
-  // Reset click count!
+  // Reset click count
   ticksCount = 0;
   currentBeat = 0;
   if (acceptingSync)
   {
     if (state == S_WAIT_FOR_SYNC)
     {
+      if (!start1Received) 
       {
-        Serial.println("Press STOP to sync");
-        startReceived = true;
-        digitalWrite(errLed, HIGH);
-
+        Serial.println("Press STOP1 to sync");
         lcd.clear();
-        lcd.setCursor(0, 2);
-        lcd.print("Press STOP to SYNC!");
+        lcd.setCursor(0, 1);
+        lcd.print("Press STOP1 to SYNC");
+        start1Received = true;
+        digitalWrite(errLed, HIGH);
+      }
+      else if (stop1Received)
+      {
+        Serial.println("Press STOP2 to sync");
+        lcd.clear();
+        lcd.setCursor(0, 1);
+        lcd.print("Press STOP2 to SYNC");
+        start2Received = true;
+        digitalWrite(errLed, HIGH);
       }
     }
     else if (state == S_SONG_LOADED)
@@ -696,12 +712,22 @@ void handleStop()
 {
   if (acceptingSync)
   {
-    if ((state == S_WAIT_FOR_SYNC) && startReceived)
+    if (state == S_WAIT_FOR_SYNC)
     {
-      Serial.println("Synced with MIDRONOME");
-      digitalWrite(errLed, LOW);
-      displaySongs();
-      state = S_LOAD;
+      if (start2Received)
+      {
+        Serial.println("Synced with MIDRONOME");
+        digitalWrite(errLed, LOW);
+        state = S_LOAD;
+      }
+      else if (start1Received)
+      {
+        Serial.println("Waiting for Start2");
+        lcd.clear();
+        lcd.setCursor(0, 1);
+        lcd.print("Press START2 to SYNC");
+        stop1Received = true;
+      }
     }
     else
     {
@@ -893,12 +919,14 @@ void setup()
   // Load songs
   loadSongList();
 
-  if (numSongs > 0)
-    displaySongs();
-  else
+  if (numSongs == 0)
     Serial.println("Failed to load songs");
 
   state = S_WAIT_FOR_SYNC;
+  lcd.clear();
+  lcd.setCursor(0, 1);
+  lcd.print("Press START1 to SYNC");
+
   Serial.println("Starting main loop");
   digitalWrite(errLed, LOW);
   previousClockTime = 0;
@@ -911,12 +939,14 @@ void loop()
   if (! acceptingSync && isMidronomeConnected)
   {
     elapsedTimeFromStart = millis() - startingClockTime;
-    Serial.print("Elapsed time from Start/Reset: ");
-    Serial.println(elapsedTimeFromStart);
-    if (elapsedTimeFromStart > 5000)
+    // Serial.print("Elapsed time from Start/Reset: ");
+    // Serial.println(elapsedTimeFromStart);
+    if (elapsedTimeFromStart > waitForAcceptingSyncMs)
       {
         acceptingSync = true;
-        Serial.println("Now accepting SYNC");
+        Serial.println("");
+        Serial.println("***Now accepting SYNC***");
+        Serial.println("");
       }
 
   }
