@@ -36,20 +36,15 @@ OFF: No channel 1 or 2 are played
 #define MIDRO_MIDI_RX 12
 #define MIDRO_MIDI_TX 11
 
-#define OUT_MIDI_RX 7
-#define OUT_MIDI_TX 6
+#define OUT_MIDI_RX1 5
+#define OUT_MIDI_TX1 4
 
-#define OUT_MIDI2_RX 5
-#define OUT_MIDI2_TX 4
+#define OUT_MIDI_RX2 7
+#define OUT_MIDI_TX2 6
 
 #define midiChannelSynthOut 1
 
-// in SyntMode Full, Main and Extra channels are sent
-// in synthMode Partial, only Main is sent
-// in synthMode Off, none of them are sent
-#define midiChannelSynthMain 1
-#define midiChannelSynthExtra 2
-
+#define midiChannelSynth 1
 #define midiChannelPedal 3
 #define midiChannelLooper 4
 
@@ -68,8 +63,9 @@ const uint8_t SD_CS_PIN = 53;
 
 //-----------------------------------------------------------------------------
 // Program variables
-static enum { S_LOAD, S_SETTINGS, S_SONG_LOADED, S_WAIT_TO_START, S_PLAYING } state;
-static enum { FULL, PARTIAL, OFF } synthMode = FULL;
+static enum { S_WAIT_FOR_SYNC, S_LOAD, S_SETTINGS, S_SONG_LOADED, S_PRE_SONG, S_PLAYING } state;
+// midiMode controls which channels are outputted to the MidiOut1 and MidiOut2
+static enum { ALL_OFF, S_LP, ALL_ALL } midiMode = S_LP;
 
 // data loading
 SdFat sd;
@@ -88,7 +84,8 @@ uint8_t lastSongDisplayed = 3;
 const uint8_t numSongsDisplayed = 4;
 
 bool startMidi = false;
-bool isSync = false;
+bool acceptingSync = false;
+bool startReceived = false;
 bool midiPlay = true;
 bool isMidronomeConnected = false;
 
@@ -107,6 +104,8 @@ uint16_t oldTempo = 0;
 
 long elapsedClockTime;
 long previousClockTime;
+long startingClockTime;
+long elapsedTimeFromStart;
 long elapsedClockTimeLoop;
 long timeLedIdleOn = 0;
 long timeLedBeatOn = 0;
@@ -153,10 +152,14 @@ Transport serialMIDIMidro(serialMidro);
 MIDI_NAMESPACE::MidiInterface<Transport> MIDI_MIDRO((Transport&)serialMIDIMidro);
 
 // OUT
-SoftwareSerial serialOut = SoftwareSerial(OUT_MIDI_RX, OUT_MIDI_TX);
-Transport serialMIDIOut(serialOut);
-MIDI_NAMESPACE::MidiInterface<Transport> MIDI_OUT((Transport&)serialMIDIOut);
+SoftwareSerial serialOut1 = SoftwareSerial(OUT_MIDI_RX1, OUT_MIDI_TX1);
+Transport serialMIDIOut1(serialOut1);
+MIDI_NAMESPACE::MidiInterface<Transport> MIDI_OUT1((Transport&)serialMIDIOut1);
 
+// OUT2
+SoftwareSerial serialOut2 = SoftwareSerial(OUT_MIDI_RX2, OUT_MIDI_TX2);
+Transport serialMIDIOut2(serialOut2);
+MIDI_NAMESPACE::MidiInterface<Transport> MIDI_OUT2((Transport&)serialMIDIOut2);
 
 const uint8_t beatIdleLed = 43;
 const uint8_t beatSongLed = 42;
@@ -164,7 +167,7 @@ const uint8_t errLed = 41;
 
 //----------------------------------------
 // Data loading
-// RESET
+// SYNC
 void onLongClick(EncoderButton& eb) {
 
   // RESET state
@@ -182,9 +185,12 @@ void onLongClick(EncoderButton& eb) {
 
   // Restart
   currentSong = 0;
-  displaySongs();
-  state = S_LOAD;
+  state = S_WAIT_FOR_SYNC;
+  startingClockTime = millis();
+  acceptingSync = false;
+  Serial.println("AcceptingSync set to false");
   digitalWrite(errLed, LOW);
+  displaySongs();
 }
 
 // SETTINGS modes - toggle between S_SETTINGS and S_LOAD
@@ -228,7 +234,7 @@ void onDoubleClick(EncoderButton& eb) {
 
 void onEncoder(EncoderButton& eb) {
   int increment = eb.increment();
-  int numSynthModes = 3;
+  int numMidiModes = 3;
 
   // for simplicity: only allow positive increments
   if (increment > 0)
@@ -237,8 +243,8 @@ void onEncoder(EncoderButton& eb) {
     {
       if (state == S_SETTINGS)
       {
-        synthMode = synthMode + increment;
-        synthMode = synthMode % numSynthModes;
+        midiMode = midiMode + increment;
+        midiMode = midiMode % numMidiModes;
         displaySettings();
       }
       else
@@ -314,14 +320,20 @@ void loadSongList(){
 void displayClockMode()
 {
   // Display clock mode
-  lcd.setCursor(19, 0);
-  if (isMidronomeConnected && isSync)
-    lcd.print("S");
-  else
-    lcd.print("U");
-  lcd.setCursor(19, 3);
   if (isMidronomeConnected)
-    lcd.print("E");
+    if (state == S_WAIT_FOR_SYNC)
+    {
+      lcd.clear();
+      lcd.setCursor(0, 2);
+      lcd.print("Press START to SYNC!");
+    }
+    else
+    {
+      lcd.setCursor(19, 0);
+      lcd.print("S");
+      lcd.setCursor(19, 3);
+      lcd.print("E");
+    }
   else
     lcd.print("I");
 }
@@ -393,7 +405,7 @@ void displayOnWait()
     lcd.setCursor(2, 0);
     lcd.print(songList[currentSong]);
     lcd.setCursor(2, 2);
-    lcd.print("Starting in ");
+    lcd.print("Starting in  8");
   }
   lcd.setCursor(15, 2);
   // Check this
@@ -413,21 +425,20 @@ void displayOnPlay()
   // Display clock mode
   displayClockMode();
 
-  // Synth mode:
-  // Display clock mode
+  // Midi MOde
   lcd.setCursor(0, 3);
-  lcd.print("Sy: ");
+  lcd.print("MIDI: ");
 
-  switch (synthMode)
+  switch (midiMode)
   {
-  case FULL:
-    lcd.print("F");
+  case ALL_OFF:
+    lcd.print("A-O");
     break;
-  case PARTIAL:
-    lcd.print("P");
+  case S_LP:
+    lcd.print("S-LP");
     break;
-  case OFF:
-    lcd.print("Off");
+  case ALL_ALL:
+    lcd.print("A-A");
     break;
   }
 }
@@ -439,16 +450,16 @@ void displaySettings()
   lcd.clear();
   // Display cursor
   lcd.setCursor(0, 0);
-  lcd.print("SYNTH MODE");
+  lcd.print("MIDI MODE");
   lcd.setCursor(2, 1);
-  lcd.print("Full");
+  lcd.print("All-Off");
   lcd.setCursor(2, 2);
-  lcd.print("Partial");
+  lcd.print("Syn-LoopPed");
   lcd.setCursor(2, 3);
-  lcd.print("Off");
+  lcd.print("All-All");
 
   // Display cursor
-  lcd.setCursor(0, 1 + int(synthMode));
+  lcd.setCursor(0, 1 + int(midiMode));
   lcd.print(">");
 }
 
@@ -544,18 +555,22 @@ void loadSong(const char* songName){
 
 void synthStopAll()
 {
-  MIDI_OUT.sendControlChange(120, 127, midiChannelSynthOut);
+  MIDI_OUT1.sendControlChange(120, 127, midiChannelSynthOut);
+  MIDI_OUT2.sendControlChange(120, 127, midiChannelSynthOut);
 }
 void looperStopAll(){
-  MIDI_OUT.sendControlChange(29, 127, midiChannelLooper);
+  MIDI_OUT1.sendControlChange(29, 127, midiChannelLooper);
+  MIDI_OUT2.sendControlChange(29, 127, midiChannelLooper);
 }
 void looperClearAll(){
-  MIDI_OUT.sendControlChange(30, 127, midiChannelLooper);
+  MIDI_OUT1.sendControlChange(30, 127, midiChannelLooper);
+  MIDI_OUT2.sendControlChange(30, 127, midiChannelLooper);
 }
 
 void songFinished()
 {
-  MIDI_OUT.sendStop();
+  MIDI_OUT1.sendStop();
+  MIDI_OUT2.sendStop();
   synthStopAll();
   SMF.close();
   startMidi = false;
@@ -580,11 +595,16 @@ void handleClock()
   if (! isMidronomeConnected)
   {
     isMidronomeConnected = true;
+    state = S_WAIT_FOR_SYNC;
     displaySongs();
   }
 
   // Propagate clock
-  MIDI_OUT.sendClock();
+  if (state != S_WAIT_FOR_SYNC)
+  {
+    MIDI_OUT1.sendClock();
+    MIDI_OUT2.sendClock();
+  }
   ticksCount++;
 
   if (ticksCount == TICKS_PER_QUARTER_CLK)
@@ -605,7 +625,16 @@ void handleClock()
       digitalWrite(beatIdleLed, HIGH);
       isLedIdleOn = true;
       timeLedIdleOn = millis();
+
+      // Flash IDLE and BEAT song in pre
+      if ((state == S_PRE_SONG))
+      {
+        digitalWrite(errLed, HIGH);
+        isLedBeatOn = true;
+        timeLedBeatOn = millis();
+      }
     }
+
     if (currentBeat == currentSongSignatureNumerator)
     {
       digitalWrite(errLed, HIGH);
@@ -615,17 +644,15 @@ void handleClock()
     }
 
     ticksCount = 0;
-    if (state == S_WAIT_TO_START)
+    if (state == S_PRE_SONG)
     {
-      currentPreQuarter++;
       Serial.print("\tStart in... ");
       Serial.println(waitForQuarters - currentPreQuarter);
+      currentPreQuarter++;
       displayOnWait();
     }
     else if (state == S_PLAYING)
     {
-      // Serial.print("\tSong at... ");
-      // Serial.println(currentSongQuarter);
       startMidi = true;
       previousTicksCount = TICKS_PER_QUARTER_CLK - 1;
       currentSongQuarter++;
@@ -642,60 +669,65 @@ void handleStart()
   // Reset click count!
   ticksCount = 0;
   currentBeat = 0;
-  // The start makes the program start counting
-  if (state == S_SONG_LOADED)
+  if (acceptingSync)
   {
-    if (isSync)
+    if (state == S_WAIT_FOR_SYNC)
+    {
+      {
+        Serial.println("Press STOP to sync");
+        startReceived = true;
+        digitalWrite(errLed, HIGH);
+
+        lcd.clear();
+        lcd.setCursor(0, 2);
+        lcd.print("Press STOP to SYNC!");
+      }
+    }
+    else if (state == S_SONG_LOADED)
     {
       Serial.println("Start! Waiting ");
-      state = S_WAIT_TO_START;
+      state = S_PRE_SONG;
       digitalWrite(beatSongLed, HIGH);
     }
-    else
-    {
-      Serial.println("Press STOP to sync");
-      digitalWrite(errLed, HIGH);
-
-      lcd.clear();
-      lcd.setCursor(0, 2);
-      lcd.print("Press STOP to SYNC!");
-    }
-    
   }
 }
 
 void handleStop()
 {
-  if (state == S_SONG_LOADED && !isSync)
+  if (acceptingSync)
   {
-    Serial.println("Synced with MIDRONOME");
-    digitalWrite(errLed, LOW);
-    isSync = true;
-    displaySongs();
-  }
-  else
-  {
-    elapsedTimeFromPlay = millis() - timeFromPlayStart;
-    if (elapsedTimeFromPlay > ingoreStopsAfterPlayMs)
+    if ((state == S_WAIT_FOR_SYNC) && startReceived)
     {
-      MIDI_OUT.sendStop();
-      synthStopAll();
-      SMF.close();
-      startMidi = false;
-      
-      looperStopAll();
-      looperClearAll();
-      
-      Serial.println("Stop! Reset");
-      digitalWrite(beatSongLed, LOW);
-      state = S_LOAD;
-      currentPreQuarter = 0;
-      currentSongQuarter = 0;
+      Serial.println("Synced with MIDRONOME");
+      digitalWrite(errLed, LOW);
       displaySongs();
+      state = S_LOAD;
     }
     else
-      Serial.println("Ignored STOP signal: too close to PLAY start");
+    {
+      elapsedTimeFromPlay = millis() - timeFromPlayStart;
+      if (elapsedTimeFromPlay > ingoreStopsAfterPlayMs)
+      {
+        MIDI_OUT1.sendStop();
+        MIDI_OUT2.sendStop();
+        synthStopAll();
+        SMF.close();
+        startMidi = false;
+        
+        looperStopAll();
+        looperClearAll();
+        
+        Serial.println("Stop! Reset");
+        digitalWrite(beatSongLed, LOW);
+        state = S_LOAD;
+        currentPreQuarter = 0;
+        currentSongQuarter = 0;
+        displaySongs();
+      }
+      else
+        Serial.println("Ignored STOP signal: too close to PLAY start");
     }
+  }
 }
 
 //---------------------------------------------------------
@@ -717,7 +749,7 @@ void tickClockInternal(void)
 // flash a LED to the beat
 {
   int beatLed;
-  if (state == S_WAIT_TO_START)
+  if (state == S_PRE_SONG)
     beatLed = beatIdleLed;
   else
     beatLed = beatSongLed;
@@ -755,30 +787,38 @@ void midiCallback(midi_event *pev)
     {
       channel = pev->channel;
 
-      bool sendEvent = true;
-      int outChannel;
-
-      if (channel == midiChannelSynthMain - 1 || channel == midiChannelSynthExtra - 1)
-        {
-          outChannel = midiChannelSynthOut - 1;
-          if (synthMode == OFF)
-            sendEvent = false;
-          else if (synthMode == PARTIAL)
-            if (channel == midiChannelSynthExtra - 1)
-              sendEvent = false;
-        }
-      else
-        outChannel = channel;
-
-      if (sendEvent)
+      if (channel == midiChannelSynth - 1)
       {
-        serialOut.write(pev->data[0] | outChannel);
-        serialOut.write(&pev->data[1], pev->size-1);
+        // Always send to out 1
+        serialOut1.write(pev->data[0] | channel);
+        serialOut1.write(&pev->data[1], pev->size-1);
+        // if ALL_ALL, also send to out 2
+        if (midiMode == ALL_ALL)
+        {
+          serialOut2.write(pev->data[0] | channel);
+          serialOut2.write(&pev->data[1], pev->size-1);
+        }
+      }
+      else if ((channel == midiChannelLooper - 1) || (channel == midiChannelPedal - 1))
+      {
+        if (midiMode != ALL_OFF)
+        {
+          serialOut2.write(pev->data[0] | channel);
+          serialOut2.write(&pev->data[1], pev->size-1);
+        }
+        if (midiMode != S_LP)
+        {
+          serialOut1.write(pev->data[0] | channel);
+          serialOut1.write(&pev->data[1], pev->size-1);
+        }
       }
     }
-    else
-      serialOut.write(pev->data, pev->size);
+    else // Other MIDI events
+    {
+      serialOut1.write(pev->data, pev->size);
+      serialOut2.write(pev->data, pev->size);
     }
+  }
 }
 
 void sysexCallback(sysex_event *pev)
@@ -810,8 +850,9 @@ void setup()
   MIDI_MIDRO.setHandleStart(handleStart);
   MIDI_MIDRO.setHandleStop(handleStop);
   
-  Serial.println("MIDI OUT");
-  MIDI_OUT.begin();
+  Serial.println("MIDI OUTS");
+  MIDI_OUT1.begin();
+  MIDI_OUT2.begin();
   
 
   // Initialize LCD and Encoder.
@@ -857,20 +898,36 @@ void setup()
   else
     Serial.println("Failed to load songs");
 
-  state = S_LOAD;
+  state = S_WAIT_FOR_SYNC;
   Serial.println("Starting main loop");
   digitalWrite(errLed, LOW);
   previousClockTime = 0;
+  startingClockTime = millis();
 }
 
 
 void loop()
 {
+  if (! acceptingSync && isMidronomeConnected)
+  {
+    elapsedTimeFromStart = millis() - startingClockTime;
+    Serial.print("Elapsed time from Start/Reset: ");
+    Serial.println(elapsedTimeFromStart);
+    if (elapsedTimeFromStart > 5000)
+      {
+        acceptingSync = true;
+        Serial.println("Now accepting SYNC");
+      }
+
+  }
+
   elapsedClockTimeLoop = millis() - previousClockTime;
 
   if ((elapsedClockTimeLoop > 2000) && (isMidronomeConnected))
   {
     isMidronomeConnected = false;
+    // No need to wait for Sync when Midronome is not connected
+    state = S_LOAD;
     displaySongs();
   }
     
@@ -900,6 +957,9 @@ void loop()
 
   switch (state)
   {
+    case S_WAIT_FOR_SYNC:
+      // handled by Start/Stop
+      break;
     case S_LOAD:
       //load current song
       loadSong(songList[currentSong]);
@@ -910,17 +970,7 @@ void loop()
       //wait for start (handled by handleStart) or reload song if user input
       break;
 
-    case S_WAIT_TO_START:
-      // TODO: handle pre in internal mode
-      // if (! isMidronomeConnected)
-      // {
-      //   bool inBeat = tickClockInternal();
-      //   if (inBeat)
-      //   {
-      //     currentPreQuarter++;
-      //     Serial.println(currentPreQuarter);
-      //   }
-      // }
+    case S_PRE_SONG:
       if (currentPreQuarter >= waitForQuarters - 1)
       {
         Serial.println("Play");
