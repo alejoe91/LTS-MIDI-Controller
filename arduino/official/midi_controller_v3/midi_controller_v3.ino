@@ -12,15 +12,10 @@ of the MIDI is used (check!).
 The output controls the MIDI devices:
 
 For our setup:
-- Channel 1 (configurable): UNO Synth Pro - IK Multimedia (notes + automation)
+- Channel 1 (configurable): UNO Synth Pro - IK Multimedia (notes + automation + clock)
+- Channel 2 (configurable): AIRA S1 - Roland (notes + automation + clock)
 - Channel 3 (configurable): Ampero Stomp II - Hotone (automation)
 - Channel 4 (not configurable): Ditto X4 Looper - TC (automation)
-
-
-Synth modes:
-FULL: Channel 1 + 2 are played
-Partial: Channel 1 only is played
-OFF: No channel 1 or 2 are played
 **
 
 */
@@ -45,9 +40,9 @@ OFF: No channel 1 or 2 are played
 #define OUT_MIDI_RX3 7
 #define OUT_MIDI_TX3 6
 
-#define midiChannelSynthOut 1
 
-#define midiChannelSynth 1
+#define midiChannelUno 1
+#define midiChannelAira 2
 #define midiChannelPedal 3
 #define midiChannelLooper 4
 
@@ -91,9 +86,11 @@ bool acceptingSync = false;
 bool start1Received = false;
 bool stop1Received = false;
 bool start2Received = false;
+bool toggleClockAtNextBeat = false;
+bool sendClockToLooper = false;
 
 bool midiPlay = true;
-bool isMidronomeConnected = false;
+bool isMidronomeConnected = true;
 
 MD_MIDIFile SMF;
 uint8_t note, velocity, channel;
@@ -243,6 +240,11 @@ void onDoubleClick(EncoderButton& eb) {
   }
 }
 
+void onTripleClick(EncoderButton& eb) {
+  if (!toggleClockAtNextBeat)
+    toggleClockAtNextBeat = true;
+}
+
 
 void onEncoder(EncoderButton& eb) {
   int increment = eb.increment();
@@ -334,13 +336,21 @@ void displayClockMode()
   // Display clock mode
   if (isMidronomeConnected)
     {
-      lcd.setCursor(19, 0);
+      lcd.setCursor(16, 0);
+      lcd.print(currentSongTempo);
       lcd.print("S");
-      lcd.setCursor(19, 3);
+      lcd.setCursor(17, 3);
       lcd.print("E");
+      if (sendClockToLooper)
+        lcd.print("-E");
+      else
+        lcd.print("-D");
     }
   else
-    lcd.print("I");
+    {
+      lcd.setCursor(19, 0);
+      lcd.print("I");
+    }
 }
 
 void adjustCurrentSong() {
@@ -394,8 +404,8 @@ void displaySongs()
 
   // Add Tempo
   lcd.setCursor(15, currentSong - firstSongDisplayed);
-  lcd.print(" ");
-  lcd.print(currentSongTempo);
+  // lcd.print(" ");
+  // lcd.print(currentSongTempo);
 
 
   // Display clock mode
@@ -440,7 +450,11 @@ void displayOnPlay()
     lcd.print("A-O");
     break;
   case S_LP:
-    lcd.print("S-LP");
+    lcd.print("S-LP - ");
+    if (sendClockToLooper)
+      lcd.print("Ck.E");
+    else
+      lcd.print("Ck.D");
     break;
   case ALL_ALL:
     lcd.print("A-A");
@@ -560,8 +574,8 @@ void loadSong(const char* songName){
 
 void synthStopAll()
 {
-  MIDI_OUT1.sendControlChange(120, 127, midiChannelSynthOut);
-  MIDI_OUT2.sendControlChange(120, 127, midiChannelSynthOut);
+  MIDI_OUT1.sendControlChange(120, 127, midiChannelUno);
+  MIDI_OUT2.sendControlChange(120, 127, midiChannelUno);
 }
 void looperStopAll(){
   MIDI_OUT1.sendControlChange(29, 127, midiChannelLooper);
@@ -610,7 +624,8 @@ void handleClock()
   if (state != S_WAIT_FOR_SYNC)
   {
     MIDI_OUT1.sendClock();
-    MIDI_OUT2.sendClock();
+    if ((sendClockToLooper) && (midiMode == S_LP))
+      MIDI_OUT2.sendClock();
   }
   ticksCount++;
 
@@ -620,6 +635,13 @@ void handleClock()
     previousClockTime = millis();
     currentSongTempo = int(60 / (float(elapsedClockTime) / 1000.));
     currentBeat++;
+
+    if (toggleClockAtNextBeat)
+    {
+      sendClockToLooper = !sendClockToLooper;
+      toggleClockAtNextBeat = false;
+      displayClockMode();
+    }
 
     if (state == S_PLAYING)
     {
@@ -813,7 +835,7 @@ void midiCallback(midi_event *pev)
     {
       channel = pev->channel;
 
-      if (channel == midiChannelSynth - 1)
+      if ((channel == midiChannelUno - 1) ||  (channel == midiChannelAira - 1))
       {
         // Always send to out 1
         serialOut1.write(pev->data[0] | channel);
@@ -891,6 +913,7 @@ void setup()
   myEnc.setLongPressHandler(onLongClick);
   myEnc.setClickHandler(onClick);
   myEnc.setDoubleClickHandler(onDoubleClick);
+  myEnc.setTripleClickHandler(onTripleClick);
   myEnc.setMultiClickInterval(200);
   myEnc.setEncoderHandler(onEncoder);
 
@@ -952,7 +975,6 @@ void loop()
   }
 
   elapsedClockTimeLoop = millis() - previousClockTime;
-
   if ((elapsedClockTimeLoop > 2000) && (isMidronomeConnected))
   {
     isMidronomeConnected = false;
