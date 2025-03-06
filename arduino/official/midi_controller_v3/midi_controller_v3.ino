@@ -574,8 +574,10 @@ void loadSong(const char* songName){
 
 void synthStopAll()
 {
-  MIDI_OUT1.sendControlChange(120, 127, midiChannelUno);
-  MIDI_OUT2.sendControlChange(120, 127, midiChannelUno);
+  MIDI_OUT1.sendControlChange(123, 0, midiChannelUno);
+  MIDI_OUT1.sendControlChange(123, 0, midiChannelAira);
+  MIDI_OUT2.sendControlChange(123, 0, midiChannelUno);
+  MIDI_OUT2.sendControlChange(123, 0, midiChannelAira);
 }
 void looperStopAll(){
   MIDI_OUT1.sendControlChange(29, 127, midiChannelLooper);
