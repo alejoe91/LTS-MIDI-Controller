@@ -43,6 +43,8 @@ For our setup:
 
 #define midiChannelUno 1
 #define midiChannelAira 2
+#define midiChannelUnoLV 5
+#define midiChannelAiraLV 6
 #define midiChannelPedal 3
 #define midiChannelLooper 4
 
@@ -62,8 +64,8 @@ const uint8_t SD_CS_PIN = 53;
 //-----------------------------------------------------------------------------
 // Program variables
 static enum { S_WAIT_FOR_SYNC, S_LOAD, S_SETTINGS, S_SONG_LOADED, S_PRE_SONG, S_PLAYING } state;
-// midiMode controls which channels are outputted to the MidiOut1 and MidiOut2
-static enum { ALL_OFF, S_LP, ALL_ALL } midiMode = S_LP;
+// liveMode controls the mapping between live channels (LV) of synths
+static enum { PLAYBACK, LIVE } liveMode = PLAYBACK;
 
 // data loading
 SdFat sd;
@@ -248,7 +250,8 @@ void onTripleClick(EncoderButton& eb) {
 
 void onEncoder(EncoderButton& eb) {
   int increment = eb.increment();
-  int numMidiModes = 3;
+  // int numMidiModes = 3;
+  int numLiveModes = 2;
 
   // for simplicity: only allow positive increments
   if (increment > 0)
@@ -257,8 +260,8 @@ void onEncoder(EncoderButton& eb) {
     {
       if (state == S_SETTINGS)
       {
-        midiMode = midiMode + increment;
-        midiMode = midiMode % numMidiModes;
+        liveMode = liveMode + increment;
+        liveMode = liveMode % numLiveModes;
         displaySettings();
       }
       else
@@ -442,24 +445,12 @@ void displayOnPlay()
 
   // Midi MOde
   lcd.setCursor(0, 3);
-  lcd.print("MIDI: ");
+  lcd.print("LIVE: ");
 
-  switch (midiMode)
-  {
-  case ALL_OFF:
-    lcd.print("A-O");
-    break;
-  case S_LP:
-    lcd.print("S-LP - ");
-    if (sendClockToLooper)
-      lcd.print("Ck.E");
-    else
-      lcd.print("Ck.D");
-    break;
-  case ALL_ALL:
-    lcd.print("A-A");
-    break;
-  }
+  if (liveMode == PLAYBACK)
+    lcd.print("ALL MIDI");
+  else
+    lcd.print("LIVE");
 }
 
 // TODO
@@ -469,16 +460,14 @@ void displaySettings()
   lcd.clear();
   // Display cursor
   lcd.setCursor(0, 0);
-  lcd.print("MIDI MODE");
+  lcd.print("LIVE MODE");
   lcd.setCursor(2, 1);
-  lcd.print("All-Off");
+  lcd.print("Playback");
   lcd.setCursor(2, 2);
-  lcd.print("Syn-LoopPed");
-  lcd.setCursor(2, 3);
-  lcd.print("All-All");
+  lcd.print("Live");
 
   // Display cursor
-  lcd.setCursor(0, 1 + int(midiMode));
+  lcd.setCursor(0, 1 + int(liveMode));
   lcd.print(">");
 }
 
@@ -626,7 +615,7 @@ void handleClock()
   if (state != S_WAIT_FOR_SYNC)
   {
     MIDI_OUT1.sendClock();
-    if ((sendClockToLooper) && (midiMode == S_LP))
+    if (sendClockToLooper)
       MIDI_OUT2.sendClock();
   }
   ticksCount++;
@@ -837,31 +826,17 @@ void midiCallback(midi_event *pev)
     {
       channel = pev->channel;
 
-      if ((channel == midiChannelUno - 1) ||  (channel == midiChannelAira - 1))
+      // Remap channels if playback
+      if (liveMode == PLAYBACK)
       {
-        // Always send to out 1
-        serialOut1.write(pev->data[0] | channel);
-        serialOut1.write(&pev->data[1], pev->size-1);
-        // if ALL_ALL, also send to out 2
-        if (midiMode == ALL_ALL)
-        {
-          serialOut2.write(pev->data[0] | channel);
-          serialOut2.write(&pev->data[1], pev->size-1);
-        }
+        if (channel == midiChannelUnoLV - 1)
+          channel = midiChannelUno - 1;
+        if (channel == midiChannelAiraLV - 1)
+          channel = midiChannelAira - 1;
       }
-      else if ((channel == midiChannelLooper - 1) || (channel == midiChannelPedal - 1))
-      {
-        if (midiMode != ALL_OFF)
-        {
-          serialOut2.write(pev->data[0] | channel);
-          serialOut2.write(&pev->data[1], pev->size-1);
-        }
-        if (midiMode != S_LP)
-        {
-          serialOut1.write(pev->data[0] | channel);
-          serialOut1.write(&pev->data[1], pev->size-1);
-        }
-      }
+
+      serialOut1.write(pev->data[0] | channel);
+      serialOut1.write(&pev->data[1], pev->size-1);
     }
     else // Other MIDI events
     {
