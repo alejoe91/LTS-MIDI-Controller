@@ -264,7 +264,7 @@ void onTripleClick(EncoderButton& eb) {
 
 void onEncoder(EncoderButton& eb) {
   int increment = eb.increment();
-  // int numMidiModes = 3;
+  int numMidiModes = 3;
   int numLiveModes = 2;
 
   // for simplicity: only allow positive increments
@@ -281,7 +281,9 @@ void onEncoder(EncoderButton& eb) {
       else if (state == S_SETTINGS_OUT)
       {
         midiMode = midiMode + increment;
-        midiMode = midiMode % 3;
+        midiMode = midiMode % numMidiModes;
+        Serial.print("Midi mode: ");
+        Serial.println(midiMode);
         displaySettingsOut();
       }
       else
@@ -507,9 +509,10 @@ void displaySettingsOut()
   lcd.setCursor(2, 1);
   lcd.print("1 only");
   lcd.setCursor(2, 2);
-  lcd.print("1 and 2");
-  lcd.setCursor(2, 3);
   lcd.print("2 only");
+  lcd.setCursor(2, 3);
+  lcd.print("1 and 2");
+
 
   // Display cursor
   lcd.setCursor(0, 1 + int(midiMode));
@@ -657,7 +660,7 @@ void handleClock()
   }
 
   // Propagate clock
-  if (state != S_WAIT_FOR_SYNC)
+  if ((state == S_PLAYING) || (state == S_PRE_SONG))
   {
     if (midiMode != ONLY_2)
       MIDI_OUT1.sendClock();
@@ -892,8 +895,8 @@ void midiCallback(midi_event *pev)
         }
       }
 
-      serialOut1.write(pev->data[0] | channel);
-      serialOut1.write(&pev->data[1], pev->size-1);
+      // serialOut1.write(pev->data[0] | channel);
+      // serialOut1.write(&pev->data[1], pev->size-1);
     }
     else // Other MIDI events
     {
