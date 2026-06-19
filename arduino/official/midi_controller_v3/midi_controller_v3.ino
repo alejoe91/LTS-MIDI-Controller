@@ -43,6 +43,8 @@ For our setup:
 
 #define midiChannelUno 1
 #define midiChannelAira 2
+#define midiChannelUnoLV 5
+#define midiChannelAiraLV 6
 #define midiChannelPedal 3
 #define midiChannelLooper 4
 
@@ -61,7 +63,9 @@ const uint8_t SD_CS_PIN = 53;
 
 //-----------------------------------------------------------------------------
 // Program variables
-static enum { S_WAIT_FOR_SYNC, S_LOAD, S_SETTINGS, S_SONG_LOADED, S_PRE_SONG, S_PLAYING } state;
+static enum { S_WAIT_FOR_SYNC, S_LOAD, S_SETTINGS_LIVE, S_SETTINGS_OUT, S_SONG_LOADED, S_PRE_SONG, S_PLAYING } state;
+// liveMode controls the mapping between live channels (LV) of synths
+static enum { PLAYBACK, LIVE } liveMode = PLAYBACK;
 // midiMode controls which channels are outputted to the MidiOut1 and MidiOut2
 static enum { ONLY_1, ONLY_2, BOTH } midiMode = ONLY_1;
 
@@ -202,7 +206,13 @@ void onLongClick(EncoderButton& eb) {
 
 // SETTINGS modes - toggle between S_SETTINGS and S_LOAD
 void onClick(EncoderButton& eb) {
-  if (! isMidronomeConnected)
+  if ((state == S_SETTINGS_LIVE) || (state == S_SETTINGS_OUT))
+  {
+    // Exit settings
+    displaySongs();
+    state = S_LOAD;
+  }
+  else if (! isMidronomeConnected)
   {
     if (state == S_PLAYING)
     {
@@ -226,10 +236,23 @@ void onClick(EncoderButton& eb) {
 }
 
 void onDoubleClick(EncoderButton& eb) {
-  if (state != S_SETTINGS)
+  if (state != S_SETTINGS_LIVE)
   {
-    state = S_SETTINGS;
-    displaySettings();
+    state = S_SETTINGS_LIVE;
+    displaySettingsLive();
+  }
+  else
+  {
+    displaySongs();
+    state = S_LOAD;
+  }
+}
+
+void onTripleClick(EncoderButton& eb) {
+  if (state != S_SETTINGS_OUT)
+  {
+    state = S_SETTINGS_OUT;
+    displaySettingsOut();
   }
   else
   {
@@ -242,17 +265,26 @@ void onDoubleClick(EncoderButton& eb) {
 void onEncoder(EncoderButton& eb) {
   int increment = eb.increment();
   int numMidiModes = 3;
+  int numLiveModes = 2;
 
   // for simplicity: only allow positive increments
   if (increment > 0)
   {
     if ((millis() - timeLastEncoder) > minEncoderChangePeriod)
     {
-      if (state == S_SETTINGS)
+      if (state == S_SETTINGS_LIVE)
+      {
+        liveMode = liveMode + increment;
+        liveMode = liveMode % numLiveModes;
+        displaySettingsLive();
+      }
+      else if (state == S_SETTINGS_OUT)
       {
         midiMode = midiMode + increment;
         midiMode = midiMode % numMidiModes;
-        displaySettings();
+        Serial.print("Midi mode: ");
+        Serial.println(midiMode);
+        displaySettingsOut();
       }
       else
       {
@@ -430,8 +462,13 @@ void displayOnPlay()
 
   // Midi MOde
   lcd.setCursor(0, 3);
-  lcd.print("MIDI: ");
+  lcd.print("LIVE: ");
 
+  if (liveMode == PLAYBACK)
+    lcd.print("N");
+  else
+    lcd.print("Y");
+  lcd.print(" - ");
   switch (midiMode)
   {
   case ONLY_1:
@@ -446,8 +483,23 @@ void displayOnPlay()
   }
 }
 
-// TODO
-void displaySettings()
+void displaySettingsLive()
+{
+  // delete cursors
+  lcd.clear();
+  // Display cursor
+  lcd.setCursor(0, 0);
+  lcd.print("LIVE MODE");
+  lcd.setCursor(2, 1);
+  lcd.print("Playback");
+  lcd.setCursor(2, 2);
+  lcd.print("Live");
+  // Display cursor
+  lcd.setCursor(0, 1 + int(liveMode));
+  lcd.print(">");
+}
+
+void displaySettingsOut()
 {
   // delete cursors
   lcd.clear();
@@ -457,9 +509,10 @@ void displaySettings()
   lcd.setCursor(2, 1);
   lcd.print("1 only");
   lcd.setCursor(2, 2);
-  lcd.print("1 and 2");
-  lcd.setCursor(2, 3);
   lcd.print("2 only");
+  lcd.setCursor(2, 3);
+  lcd.print("1 and 2");
+
 
   // Display cursor
   lcd.setCursor(0, 1 + int(midiMode));
@@ -607,7 +660,7 @@ void handleClock()
   }
 
   // Propagate clock
-  if (state != S_WAIT_FOR_SYNC)
+  if ((state == S_PLAYING) || (state == S_PRE_SONG))
   {
     if (midiMode != ONLY_2)
       MIDI_OUT1.sendClock();
@@ -679,6 +732,7 @@ void handleStart()
   ticksCount = 0;
   currentBeat = 0;
   currentPreQuarter = 0;
+  Serial.println("START received");
   if (acceptingSync)
   {
     if (state == S_WAIT_FOR_SYNC)
@@ -816,6 +870,15 @@ void midiCallback(midi_event *pev)
     {
       channel = pev->channel;
 
+      // Remap channels if playback
+      if (liveMode == PLAYBACK)
+      {
+        if (channel == midiChannelUnoLV - 1)
+          channel = midiChannelUno - 1;
+        if (channel == midiChannelAiraLV - 1)
+          channel = midiChannelAira - 1;
+      }
+
       if ((channel == midiChannelUno - 1) || (channel == midiChannelAira - 1) || (channel == midiChannelLooper - 1) || (channel == midiChannelPedal - 1))
       {
         // OUT 1
@@ -831,6 +894,9 @@ void midiCallback(midi_event *pev)
           serialOut2.write(&pev->data[1], pev->size-1);
         }
       }
+
+      // serialOut1.write(pev->data[0] | channel);
+      // serialOut1.write(&pev->data[1], pev->size-1);
     }
     else // Other MIDI events
     {
@@ -864,18 +930,18 @@ void setup()
   pinMode(beatSongLed, OUTPUT);
   pinMode(errLed, OUTPUT);
 
+  Serial.println("MIDI OUTS");
+  MIDI_OUT1.begin();
+  MIDI_OUT2.begin();
+
   // Initialize MIDI
   Serial.println("MIDI IN");
   MIDI_MIDRO.begin(MIDI_CHANNEL_OMNI);
   MIDI_MIDRO.setHandleClock(handleClock);
   MIDI_MIDRO.setHandleStart(handleStart);
   MIDI_MIDRO.setHandleStop(handleStop);
-  
-  // Serial.println("MIDI OUTS");
-  MIDI_OUT1.begin();
-  MIDI_OUT2.begin();
 
-  serialMidro.listen();   // reclaim the RX slot after the outputs' begin()
+  // serialMidro.listen();   // reclaim the RX slot after the outputs' begin()
 
   // Initialize LCD and Encoder.
   Serial.println("LCD");
@@ -887,6 +953,7 @@ void setup()
   myEnc.setLongPressHandler(onLongClick);
   myEnc.setClickHandler(onClick);
   myEnc.setDoubleClickHandler(onDoubleClick);
+  myEnc.setTripleClickHandler(onTripleClick);
   myEnc.setMultiClickInterval(200);
   myEnc.setEncoderHandler(onEncoder);
 
