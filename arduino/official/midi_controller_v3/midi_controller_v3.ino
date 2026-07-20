@@ -47,6 +47,7 @@ For our setup:
 #define midiChannelAiraLV 6
 #define midiChannelPedal 3
 #define midiChannelLooper 4
+#define midiChannelMidro 12
 
 
 #define TICKS_PER_QUARTER_CLK 24
@@ -63,7 +64,7 @@ const uint8_t SD_CS_PIN = 53;
 
 //-----------------------------------------------------------------------------
 // Program variables
-static enum { S_WAIT_FOR_SYNC, S_LOAD, S_SETTINGS_LIVE, S_SETTINGS_OUT, S_SONG_LOADED, S_PRE_SONG, S_PLAYING } state;
+static enum { S_WAIT_FOR_SYNC, S_LOAD, S_SETTINGS_LIVE, S_SETTINGS_OUT, S_SONG_LOADED, S_TEMPO_SET, S_START_SONG, S_PRE_SONG, S_PLAYING } state;
 // liveMode controls the mapping between live channels (LV) of synths
 static enum { PLAYBACK, LIVE } liveMode = PLAYBACK;
 // midiMode controls which channels are outputted to the MidiOut1 and MidiOut2
@@ -83,6 +84,8 @@ uint8_t numSongs = 0;
 int8_t currentSong = 0;
 uint8_t firstSongDisplayed = 0;
 uint8_t lastSongDisplayed = 3;
+uint16_t midiSongTempo = 0;
+uint16_t currentSongTempo = 0;
 const uint8_t numSongsDisplayed = 4;
 
 bool startMidi = false;
@@ -103,7 +106,6 @@ uint16_t midiTempo = 0;
 
 // clock count
 const uint16_t waitForAcceptingSyncMs = 5000;
-uint16_t currentSongTempo = 0;
 uint16_t currentSongSignatureNumerator = 4;
 uint8_t currentBeat = 0;
 uint16_t oldTempo = 0;
@@ -187,7 +189,7 @@ void onLongClick(EncoderButton& eb) {
   delay(500);
 
   // Stop all MIDI
-  songFinished();
+  songFinished(false);
 
   // Restart
   currentSong = 0;
@@ -217,9 +219,8 @@ void onClick(EncoderButton& eb) {
     if (state == S_PLAYING)
     {
       // Stop all MIDI
-      songFinished();
+      songFinished(false);
       // Restart
-      currentSong = 0;
       displaySongs();
       state = S_LOAD;
       digitalWrite(beatSongLed, LOW);
@@ -233,6 +234,18 @@ void onClick(EncoderButton& eb) {
       state = S_PLAYING;
     }
   }
+  else
+    if (state == S_SONG_LOADED)
+    {
+      setMidroTempo();
+      state = S_TEMPO_SET;
+    }
+    else if (state == S_TEMPO_SET)
+      // Now start the song at next beat
+      state = S_START_SONG;
+    else if ((state == S_PRE_SONG) || (state == S_PLAYING))
+      // Stop song
+      songFinished(false);
 }
 
 void onDoubleClick(EncoderButton& eb) {
@@ -349,6 +362,21 @@ void loadSongList(){
       }
       nextFile.close();
     }
+
+    // Sort song names alphanumerically (case-insensitive)
+    char tmp[20];
+    for (uint8_t i = 1; i < numSongs; i++)
+    {
+      strcpy(tmp, songList[i]);
+      int8_t j = i - 1;
+      while (j >= 0 && strcasecmp(songList[j], tmp) > 0)
+      {
+        strcpy(songList[j + 1], songList[j]);
+        j--;
+      }
+      strcpy(songList[j + 1], tmp);
+    }
+
     Serial.print("Loaded ");
     Serial.print(numSongs);
     Serial.println(" songs");
@@ -569,7 +597,8 @@ void loadSong(const char* songName){
     strcpy(midiFileName, songName);
     strcat(midiFileName, ".mid");
 
-    currentSongTempo = loadSongTempo(midiFileName);
+    midiSongTempo = loadSongTempo(midiFileName);
+    currentSongTempo = midiSongTempo;
     uint16_t songSignature = loadSongSignature(midiFileName);
     currentSongSignatureNumerator = songSignature >> 8;
     uint16_t denumerator = songSignature - (currentSongSignatureNumerator * 256);
@@ -611,28 +640,41 @@ void loadSong(const char* songName){
 
 void synthStopAll()
 {
-  MIDI_OUT1.sendControlChange(123, 0, midiChannelUno);
-  MIDI_OUT1.sendControlChange(123, 0, midiChannelAira);
-  MIDI_OUT2.sendControlChange(123, 0, midiChannelUno);
-  MIDI_OUT2.sendControlChange(123, 0, midiChannelAira);
+  if (midiMode != ONLY_2)
+  {
+    MIDI_OUT1.sendControlChange(123, 0, midiChannelUno);
+    MIDI_OUT1.sendControlChange(123, 0, midiChannelAira);
+  }
+  if (midiMode != ONLY_1)
+  {
+    MIDI_OUT2.sendControlChange(123, 0, midiChannelUno);
+    MIDI_OUT2.sendControlChange(123, 0, midiChannelAira);
+  }
 }
 void looperStopAll(){
-  MIDI_OUT1.sendControlChange(29, 127, midiChannelLooper);
-  MIDI_OUT2.sendControlChange(29, 127, midiChannelLooper);
+  if (midiMode != ONLY_2)
+    MIDI_OUT1.sendControlChange(29, 127, midiChannelLooper);
+  if (midiMode != ONLY_1)
+    MIDI_OUT2.sendControlChange(29, 127, midiChannelLooper);
 }
 void looperClearAll(){
-  MIDI_OUT1.sendControlChange(30, 127, midiChannelLooper);
-  MIDI_OUT2.sendControlChange(30, 127, midiChannelLooper);
+  if (midiMode != ONLY_2)
+    MIDI_OUT1.sendControlChange(30, 127, midiChannelLooper);
+  if (midiMode != ONLY_1)
+    MIDI_OUT2.sendControlChange(30, 127, midiChannelLooper);
 }
 
-void songFinished()
+void songFinished(bool nextSong)
 {
-  MIDI_OUT1.sendStop();
-  MIDI_OUT2.sendStop();
-  synthStopAll();
+  if (midiMode != ONLY_2)
+    MIDI_OUT1.sendStop();
+  if (midiMode != ONLY_1)
+    MIDI_OUT2.sendStop();
+
   SMF.close();
   startMidi = false;
-  
+
+  synthStopAll();
   looperStopAll();
   looperClearAll();
   
@@ -640,9 +682,34 @@ void songFinished()
   state = S_LOAD;
   currentSongQuarter = 0;
   currentPreQuarter = 0;
-  currentSong++;
+  if (nextSong)
+    currentSong++;
   currentSong = currentSong % numSongs;
   displaySongs();
+}
+
+void setMidroTempo()
+{
+  uint8_t tempo_MSB;
+  uint8_t tempo_LSB;
+
+  tempo_MSB = midiSongTempo / 128;
+  tempo_LSB = midiSongTempo % 128;
+  Serial.print("Tempo MSB: ");
+  Serial.println(tempo_MSB);
+  Serial.print("Tempo LSB: ");
+  Serial.println(tempo_LSB);
+
+  if (midiMode != ONLY_2)
+  {
+    MIDI_OUT1.sendControlChange(85, tempo_MSB, midiChannelMidro);
+    MIDI_OUT1.sendControlChange(86, tempo_LSB, midiChannelMidro);
+  }
+  if (midiMode != ONLY_1)
+  {
+    MIDI_OUT2.sendControlChange(85, tempo_MSB, midiChannelMidro);
+    MIDI_OUT2.sendControlChange(86, tempo_LSB, midiChannelMidro);
+  }
 }
 
 
@@ -660,7 +727,7 @@ void handleClock()
   }
 
   // Propagate clock
-  if ((state == S_PLAYING) || (state == S_PRE_SONG))
+  if ((state == S_PLAYING) || (state == S_PRE_SONG) || (state == S_TEMPO_SET))
   {
     if (midiMode != ONLY_2)
       MIDI_OUT1.sendClock();
@@ -669,6 +736,7 @@ void handleClock()
   }
   ticksCount++;
 
+  // Flash LEDs following beat
   if (ticksCount == TICKS_PER_QUARTER_CLK)
   {
     elapsedClockTime = millis() - previousClockTime;
@@ -688,7 +756,6 @@ void handleClock()
       isLedIdleOn = true;
       timeLedIdleOn = millis();
 
-      // Flash IDLE and BEAT song in pre
       if ((state == S_PRE_SONG))
       {
         digitalWrite(errLed, HIGH);
@@ -703,6 +770,14 @@ void handleClock()
       isLedBeatOn = true;
       timeLedBeatOn = millis();
       currentBeat = 0;
+
+      // start song from button
+      if (state == S_START_SONG)
+      {
+        Serial.println("Start! Waiting ");
+        state = S_PRE_SONG;
+        digitalWrite(beatSongLed, HIGH);
+      }
     }
 
     ticksCount = 0;
@@ -721,7 +796,7 @@ void handleClock()
 
       // Check if song has finished
       if (SMF.isEOF())
-          songFinished();
+          songFinished(true);
     }
   }
 }
@@ -756,7 +831,7 @@ void handleStart()
         digitalWrite(errLed, HIGH);
       }
     }
-    else if (state == S_SONG_LOADED)
+    else if ((state == S_SONG_LOADED) || (state == S_TEMPO_SET))
     {
       Serial.println("Start! Waiting ");
       state = S_PRE_SONG;
@@ -790,28 +865,13 @@ void handleStop()
     {
       elapsedTimeFromPlay = millis() - timeFromPlayStart;
       if (elapsedTimeFromPlay > ingoreStopsAfterPlayMs)
-      {
-        MIDI_OUT1.sendStop();
-        MIDI_OUT2.sendStop();
-        synthStopAll();
-        SMF.close();
-        startMidi = false;
-        
-        looperStopAll();
-        looperClearAll();
-        
-        Serial.println("Stop! Reset");
-        digitalWrite(beatSongLed, LOW);
-        state = S_LOAD;
-        currentPreQuarter = 0;
-        currentSongQuarter = 0;
-        displaySongs();
-      }
+        songFinished(false);
       else
         Serial.println("Ignored STOP signal: too close to PLAY start");
     }
   }
 }
+
 
 //---------------------------------------------------------
 // MIDI file functions
@@ -1062,7 +1122,8 @@ void loop()
     case S_SONG_LOADED:
       //wait for start (handled by handleStart) or reload song if user input
       break;
-
+    case S_TEMPO_SET:
+      break;
     case S_PRE_SONG:
       if (currentPreQuarter >= waitForQuarters - 1)
       {
@@ -1097,7 +1158,7 @@ void loop()
               tickClockInternal();
           }
           else
-            songFinished();
+            songFinished(true);
         }
       }
       break;
