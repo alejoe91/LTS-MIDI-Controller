@@ -109,6 +109,7 @@ const uint16_t waitForAcceptingSyncMs = 5000;
 uint16_t currentSongSignatureNumerator = 4;
 uint8_t currentBeat = 0;
 uint16_t oldTempo = 0;
+bool isQuarter = false;
 
 long elapsedClockTime;
 long previousClockTime;
@@ -666,10 +667,10 @@ void looperClearAll(){
 
 void songFinished(bool nextSong)
 {
-  if (midiMode != ONLY_2)
-    MIDI_OUT1.sendStop();
-  if (midiMode != ONLY_1)
-    MIDI_OUT2.sendStop();
+  // if (midiMode != ONLY_2)
+  //   MIDI_OUT1.sendStop();
+  // if (midiMode != ONLY_1)
+  //   MIDI_OUT2.sendStop();
 
   SMF.close();
   startMidi = false;
@@ -776,6 +777,7 @@ void handleClock()
       {
         Serial.println("Start! Waiting ");
         state = S_PRE_SONG;
+        currentPreQuarter = 0;
         digitalWrite(beatSongLed, HIGH);
       }
     }
@@ -787,6 +789,16 @@ void handleClock()
       Serial.println(waitForQuarters - currentPreQuarter);
       currentPreQuarter++;
       displayOnWait();
+      // if (currentPreQuarter >= waitForQuarters)
+      // {
+      //   Serial.println("Play");
+      //   // prevent spurious stops after Play
+      //   timeFromPlayStart = millis();
+      //   state = S_PLAYING;
+      //   currentPreQuarter = 0;
+      //   digitalWrite(beatSongLed, LOW);
+      //   displayOnPlay();
+      // }
     }
     else if (state == S_PLAYING)
     {
@@ -835,6 +847,7 @@ void handleStart()
     {
       Serial.println("Start! Waiting ");
       state = S_PRE_SONG;
+      currentPreQuarter = 1;
       digitalWrite(beatSongLed, HIGH);
     }
   }
@@ -1125,7 +1138,7 @@ void loop()
     case S_TEMPO_SET:
       break;
     case S_PRE_SONG:
-      if (currentPreQuarter >= waitForQuarters - 1)
+      if (currentPreQuarter >= waitForQuarters)
       {
         Serial.println("Play");
         // prevent spurious stops after Play
