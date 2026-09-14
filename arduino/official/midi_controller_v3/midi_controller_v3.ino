@@ -130,6 +130,7 @@ const uint16_t ingoreStopsAfterPlayMs = 2000;
 
 bool songStarted = false;
 bool printedStart = false;
+bool updateCountdownDisplay = false;
 uint8_t ticksCount = 0; // 0-TICKS_PER_QUARTER_CLK ticks
 uint8_t previousTicksCount = 0; // 0-TICKS_PER_QUARTER_CLK ticks
 uint8_t currentPreQuarter = 0;
@@ -775,7 +776,6 @@ void handleClock()
       // start song from button
       if (state == S_START_SONG)
       {
-        Serial.println("Start! Waiting ");
         state = S_PRE_SONG;
         currentPreQuarter = 0;
         digitalWrite(beatSongLed, HIGH);
@@ -785,20 +785,8 @@ void handleClock()
     ticksCount = 0;
     if (state == S_PRE_SONG)
     {
-      Serial.print("\tStart in... ");
-      Serial.println(waitForQuarters - currentPreQuarter);
       currentPreQuarter++;
-      displayOnWait();
-      // if (currentPreQuarter >= waitForQuarters)
-      // {
-      //   Serial.println("Play");
-      //   // prevent spurious stops after Play
-      //   timeFromPlayStart = millis();
-      //   state = S_PLAYING;
-      //   currentPreQuarter = 0;
-      //   digitalWrite(beatSongLed, LOW);
-      //   displayOnPlay();
-      // }
+      updateCountdownDisplay = true;
     }
     else if (state == S_PLAYING)
     {
@@ -1138,15 +1126,22 @@ void loop()
     case S_TEMPO_SET:
       break;
     case S_PRE_SONG:
+      if (updateCountdownDisplay)
+      {
+        Serial.print("\tStart in... ");
+        Serial.println(waitForQuarters - currentPreQuarter);
+        displayOnWait();
+        updateCountdownDisplay = false;
+      }
       if (currentPreQuarter >= waitForQuarters)
       {
         Serial.println("Play");
         // prevent spurious stops after Play
         timeFromPlayStart = millis();
+        displayOnPlay();
         state = S_PLAYING;
         currentPreQuarter = 0;
         digitalWrite(beatSongLed, LOW);
-        displayOnPlay();
       }
       break;
     case S_PLAYING:
