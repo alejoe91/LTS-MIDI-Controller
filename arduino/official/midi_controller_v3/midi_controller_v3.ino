@@ -28,8 +28,10 @@ For our setup:
 #include <SoftwareSerial.h>
 #include <LiquidCrystal_I2C.h>
 
-#define MIDRO_MIDI_RX 12
-#define MIDRO_MIDI_TX 11
+// Midronome input moved to hardware Serial1 (RX1 = D19), jumpered from D12 on the
+// shield. D12 must stay an input (never pinMode OUTPUT) since it's wired in parallel.
+// #define MIDRO_MIDI_RX 12
+// #define MIDRO_MIDI_TX 11
 
 #define OUT_MIDI_RX1 5
 #define OUT_MIDI_TX1 4
@@ -109,6 +111,7 @@ const uint16_t waitForAcceptingSyncMs = 5000;
 uint16_t currentSongSignatureNumerator = 4;
 uint8_t currentBeat = 0;
 uint16_t oldTempo = 0;
+bool isQuarter = false;
 
 long elapsedClockTime;
 long previousClockTime;
@@ -129,6 +132,23 @@ const uint16_t ingoreStopsAfterPlayMs = 2000;
 
 bool songStarted = false;
 bool printedStart = false;
+bool updateCountdownDisplay = false;
+bool pendingTempoSet = false;
+uint32_t totalPulses = 0;
+// When the last clock pulse actually arrived. Lets lost-pulse recovery tell a
+// destroyed pulse apart from a Midronome that simply is not running.
+uint32_t lastPulseMs = 0;
+// Smoothed ms-per-pulse, used to reconstruct pulses lost during SD access.
+// Outlier-rejected so a beat that spanned a load cannot poison the estimate.
+float pulsePeriodEma = 0.0;
+// Carried fractional pulse, so repeated sub-pulse corrections do not round away.
+float pulseResidue = 0.0;
+// Deferred lost-pulse guard, completed in loop(). Used for blocking work that
+// can run from inside handleClock() (songFinished on EOF), where draining the
+// MIDI input in place would re-enter MIDI_MIDRO.read() and corrupt the parser.
+bool pulseGuardActive = false;
+uint32_t pulseGuardT0 = 0;
+uint32_t pulseGuardP0 = 0;
 uint8_t ticksCount = 0; // 0-TICKS_PER_QUARTER_CLK ticks
 uint8_t previousTicksCount = 0; // 0-TICKS_PER_QUARTER_CLK ticks
 uint8_t currentPreQuarter = 0;
@@ -143,6 +163,10 @@ const int encPinInput2 = A9;
 const int encPinButton = 30;
 long timeLastEncoder = 0;
 const uint8_t minEncoderChangePeriod = 50;
+// Wait for the encoder to settle before hitting the SD card - see S_LOAD.
+// Browsing runs at roughly one detent per 600-800ms, so this has to sit well
+// above that or every song still loads and the deferral buys nothing.
+const uint16_t songLoadSettleMs = 1500;
 EncoderButton myEnc(encPinInput1, encPinInput2, encPinButton);
 
 //------------------------------------------------------------------------------
@@ -155,9 +179,12 @@ bool lcdIsOn = true;
 using Transport = MIDI_NAMESPACE::SerialMIDI<SoftwareSerial>;
 
 // MIDRONOME
-SoftwareSerial serialMidro = SoftwareSerial(MIDRO_MIDI_RX, MIDRO_MIDI_TX);
-Transport serialMIDIMidro(serialMidro);
-MIDI_NAMESPACE::MidiInterface<Transport> MIDI_MIDRO((Transport&)serialMIDIMidro);
+// Hardware UART: bytes are received by the USART itself, so interrupt blackouts
+// (SD access, SoftwareSerial writes) no longer drop incoming clock pulses.
+MIDI_CREATE_INSTANCE(HardwareSerial, Serial1, MIDI_MIDRO);
+// SoftwareSerial serialMidro = SoftwareSerial(MIDRO_MIDI_RX, MIDRO_MIDI_TX);
+// Transport serialMIDIMidro(serialMidro);
+// MIDI_NAMESPACE::MidiInterface<Transport> MIDI_MIDRO((Transport&)serialMIDIMidro);
 
 // OUT
 SoftwareSerial serialOut1 = SoftwareSerial(OUT_MIDI_RX1, OUT_MIDI_TX1);
@@ -237,7 +264,8 @@ void onClick(EncoderButton& eb) {
   else
     if (state == S_SONG_LOADED)
     {
-      setMidroTempo();
+      // Deferred to just after the next clock tick - see handleClock()
+      pendingTempoSet = true;
       state = S_TEMPO_SET;
     }
     else if (state == S_TEMPO_SET)
@@ -281,20 +309,24 @@ void onEncoder(EncoderButton& eb) {
   int numLiveModes = 2;
 
   // for simplicity: only allow positive increments
-  if (increment > 0)
+  // if (increment > 0)
+  if (increment != 0)
   {
     if ((millis() - timeLastEncoder) > minEncoderChangePeriod)
     {
       if (state == S_SETTINGS_LIVE)
       {
-        liveMode = liveMode + increment;
-        liveMode = liveMode % numLiveModes;
+        // liveMode = liveMode + increment;
+        // liveMode = liveMode % numLiveModes;
+        // C++ % keeps the sign, so add n back to stay non-negative when turning back
+        liveMode = ((liveMode + increment) % numLiveModes + numLiveModes) % numLiveModes;
         displaySettingsLive();
       }
       else if (state == S_SETTINGS_OUT)
       {
-        midiMode = midiMode + increment;
-        midiMode = midiMode % numMidiModes;
+        // midiMode = midiMode + increment;
+        // midiMode = midiMode % numMidiModes;
+        midiMode = ((midiMode + increment) % numMidiModes + numMidiModes) % numMidiModes;
         Serial.print("Midi mode: ");
         Serial.println(midiMode);
         displaySettingsOut();
@@ -303,6 +335,11 @@ void onEncoder(EncoderButton& eb) {
       {
         currentSong = currentSong + increment;
         adjustCurrentSong();
+        // Show the new selection straight away; the SD load itself is deferred
+        // in S_LOAD until scrolling stops. Clear the tempo so the placeholder
+        // shows instead of the previous song's value until the load lands.
+        currentSongTempo = 0;
+        displaySongs();
         state = S_LOAD;
       }
     }
@@ -406,7 +443,9 @@ void adjustCurrentSong() {
   {
     // Serial.println("Current song negative");
     currentSong = numSongs - 1;
-    firstSongDisplayed = currentSong - numSongsDisplayed + 1;
+    // firstSongDisplayed = currentSong - numSongsDisplayed + 1;
+    // Guard short lists: firstSongDisplayed is unsigned and would underflow
+    firstSongDisplayed = (numSongs > numSongsDisplayed) ? numSongs - numSongsDisplayed : 0;
     lastSongDisplayed = currentSong;
   }
   else if (currentSong > numSongs - 1)
@@ -450,10 +489,17 @@ void displaySongs()
   lcd.setCursor(0, currentSong - firstSongDisplayed);
   lcd.print(">");
 
-  // Add Tempo
+  // Add Tempo. The SD load is deferred until scrolling stops, so the tempo is
+  // unknown for the song under the cursor until then - show a placeholder
+  // rather than the previously loaded song's value.
   lcd.setCursor(15, currentSong - firstSongDisplayed);
-  // lcd.print(" ");
-  // lcd.print(currentSongTempo);
+  if (currentSongTempo > 0)
+  {
+    lcd.print(" ");
+    lcd.print(currentSongTempo);
+  }
+  else
+    lcd.print(" ...");
 
 
   // Display clock mode
@@ -578,7 +624,74 @@ uint16_t loadSongSignature(const char* midiFileName)
   return midiSignature;
 }
 
+// Reconstruct clock pulses destroyed during SD access.
+//
+// SdFat masks interrupts across SPI transfers, and SoftwareSerial RX needs its
+// pin-change ISR to fire within ~32us of a start bit or the byte is gone - so
+// pulses are lost outright rather than merely delayed (measured ~5% across a
+// load). Each lost pulse slides ticksCount/currentBeat permanently late, and
+// only handleStart() ever re-anchors them, which is why a Midronome start plays
+// tight and an encoder start does not.
+//
+// We know how long the load took and the current ms-per-pulse, so the pulses
+// that should have arrived are recoverable. Advance the grid by the shortfall,
+// carrying the fraction so repeated sub-pulse corrections do not round away.
+void recoverLostPulses(uint32_t windowStartMs, uint32_t dtMs, uint32_t rxPulses)
+{
+  if ((pulsePeriodEma <= 0.0) || !isMidronomeConnected)
+    return;
+
+  // The clock must have been running when the window opened. A stopped
+  // Midronome sends nothing, so a zero count there means nothing was lost -
+  // "recovering" it invents pulses and pushes the grid early. This is exactly
+  // what happens on the load right after the sync handshake's final STOP.
+  // (lastPulseMs can be newer than windowStartMs if a pulse landed inside the
+  // window; that proves the clock was alive, so only test the older case.)
+  if (lastPulseMs < windowStartMs)
+  {
+    if (float(windowStartMs - lastPulseMs) > 3.0 * pulsePeriodEma)
+      return;
+  }
+
+  float lost = (float(dtMs) / pulsePeriodEma) - float(rxPulses) + pulseResidue;
+  if (lost < 0.0)
+  {
+    // Received at least as many as expected - keep the surplus as residue so it
+    // offsets the next correction rather than rewinding the grid. Clamp at one
+    // pulse: a genuine surplus is just integer quantisation, so anything larger
+    // is measurement error and must not be carried, or it suppresses real
+    // corrections later.
+    pulseResidue = (lost < -1.0) ? -1.0 : lost;
+    return;
+  }
+
+  int16_t whole = int16_t(lost);
+  pulseResidue = lost - float(whole);
+
+  // A correction beyond the RX buffer depth means the estimate is unreliable
+  // (stalled clock, tempo jump); clamp rather than jump the grid wildly.
+  if (whole > 64)
+    whole = 64;
+
+  for (int16_t i = 0; i < whole; i++)
+  {
+    ticksCount++;
+    if (ticksCount == TICKS_PER_QUARTER_CLK)
+    {
+      ticksCount = 0;
+      currentBeat++;
+      if (currentBeat == currentSongSignatureNumerator)
+        currentBeat = 0;
+    }
+  }
+
+}
+
 void loadSong(const char* songName){
+  // Bracket the SD access so pulses it destroys can be reconstructed afterwards.
+  uint32_t loadT0 = millis();
+  uint32_t loadP0 = totalPulses;
+
   if (!rootDir.open("/")) {
     Serial.println("Root open failed");
   }
@@ -633,6 +746,11 @@ void loadSong(const char* songName){
     }
     rootDir.close();
   }
+
+  // Pulses that arrived during the load are still sitting in the RX buffer -
+  // drain them first, so only the ones actually destroyed count as missing.
+  while (MIDI_MIDRO.read()) {}
+  recoverLostPulses(loadT0, millis() - loadT0, totalPulses - loadP0);
 }
 
 //----------------------------------------
@@ -666,10 +784,19 @@ void looperClearAll(){
 
 void songFinished(bool nextSong)
 {
-  if (midiMode != ONLY_2)
-    MIDI_OUT1.sendStop();
-  if (midiMode != ONLY_1)
-    MIDI_OUT2.sendStop();
+  // The stop-all bursts below are blocking SoftwareSerial writes that destroy
+  // incoming clock bytes. Open a guard; loop() closes it once it has drained.
+  if (!pulseGuardActive)
+  {
+    pulseGuardT0 = millis();
+    pulseGuardP0 = totalPulses;
+    pulseGuardActive = true;
+  }
+
+  // if (midiMode != ONLY_2)
+  //   MIDI_OUT1.sendStop();
+  // if (midiMode != ONLY_1)
+  //   MIDI_OUT2.sendStop();
 
   SMF.close();
   startMidi = false;
@@ -726,8 +853,12 @@ void handleClock()
     lcd.print("Press START1 to SYNC");
   }
 
-  // Propagate clock
-  if ((state == S_PLAYING) || (state == S_PRE_SONG) || (state == S_TEMPO_SET))
+  // Propagate clock.
+  // S_TEMPO_SET is deliberately excluded: SoftwareSerial::write() blocks interrupts
+  // for ~320us per byte, which drops incoming Midronome clock bytes and slips
+  // ticksCount/currentBeat. That state can last indefinitely (waiting for the user's
+  // second click), so forwarding there desyncs the grid before the count-in starts.
+  if ((state == S_PLAYING) || (state == S_PRE_SONG))
   {
     if (midiMode != ONLY_2)
       MIDI_OUT1.sendClock();
@@ -735,6 +866,18 @@ void handleClock()
       MIDI_OUT2.sendClock();
   }
   ticksCount++;
+  totalPulses++;
+  lastPulseMs = millis();
+
+  // Send the tempo CCs here, right after a tick has been counted: these are
+  // blocking SoftwareSerial writes (~2-4ms with interrupts off) and would drop
+  // incoming clock bytes if sent at an arbitrary time from onClick(), slipping
+  // ticksCount and offsetting every later beat.
+  if (pendingTempoSet)
+  {
+    pendingTempoSet = false;
+    setMidroTempo();
+  }
 
   // Flash LEDs following beat
   if (ticksCount == TICKS_PER_QUARTER_CLK)
@@ -743,6 +886,36 @@ void handleClock()
     previousClockTime = millis();
     currentSongTempo = int(60 / (float(elapsedClockTime) / 1000.));
     currentBeat++;
+
+    // Track ms-per-pulse for lost-pulse recovery. Reject beats more than 25%
+    // off the running estimate: those are beats that spanned an SD load, and
+    // folding them in would inflate the period and under-correct.
+    {
+      float beatMs = float(elapsedClockTime);
+      if (beatMs > 0)
+      {
+        static uint8_t emaRejects = 0;
+        float thisPeriod = beatMs / float(TICKS_PER_QUARTER_CLK);
+        if (pulsePeriodEma <= 0.0)
+        {
+          pulsePeriodEma = thisPeriod;
+          emaRejects = 0;
+        }
+        else if ((thisPeriod > pulsePeriodEma * 0.75) && (thisPeriod < pulsePeriodEma * 1.25))
+        {
+          pulsePeriodEma += (thisPeriod - pulsePeriodEma) * 0.125;
+          emaRejects = 0;
+        }
+        else if (++emaRejects >= 8)
+        {
+          // Seeded on a bad beat (or the tempo genuinely jumped), so the gate is
+          // now rejecting every good beat and the estimate is stuck. Re-seed.
+          pulsePeriodEma = thisPeriod;
+          pulseResidue = 0.0;
+          emaRejects = 0;
+        }
+      }
+    }
 
     if (state == S_PLAYING)
     {
@@ -774,8 +947,8 @@ void handleClock()
       // start song from button
       if (state == S_START_SONG)
       {
-        Serial.println("Start! Waiting ");
         state = S_PRE_SONG;
+        currentPreQuarter = 0;
         digitalWrite(beatSongLed, HIGH);
       }
     }
@@ -783,10 +956,8 @@ void handleClock()
     ticksCount = 0;
     if (state == S_PRE_SONG)
     {
-      Serial.print("\tStart in... ");
-      Serial.println(waitForQuarters - currentPreQuarter);
       currentPreQuarter++;
-      displayOnWait();
+      updateCountdownDisplay = true;
     }
     else if (state == S_PLAYING)
     {
@@ -807,6 +978,9 @@ void handleStart()
   ticksCount = 0;
   currentBeat = 0;
   currentPreQuarter = 0;
+  // START re-anchors the grid outright, so a carried fractional correction from
+  // before is stale - applying it later would offset a grid that is already correct.
+  pulseResidue = 0.0;
   Serial.println("START received");
   if (acceptingSync)
   {
@@ -835,6 +1009,8 @@ void handleStart()
     {
       Serial.println("Start! Waiting ");
       state = S_PRE_SONG;
+      currentPreQuarter = 1;
+      updateCountdownDisplay = true;
       digitalWrite(beatSongLed, HIGH);
     }
   }
@@ -1001,7 +1177,7 @@ void setup()
   MIDI_MIDRO.setHandleStart(handleStart);
   MIDI_MIDRO.setHandleStop(handleStop);
 
-  // serialMidro.listen();   // reclaim the RX slot after the outputs' begin()
+  // serialMidro.listen();   // reclaim the RX slot after the outputs' begin() (not needed with Serial1)
 
   // Initialize LCD and Encoder.
   Serial.println("LCD");
@@ -1104,6 +1280,13 @@ void loop()
   // (SD load / LCD writes) doesn't overflow it and drop clock/Start bytes
   while (MIDI_MIDRO.read()) {}
 
+  // Close a deferred pulse guard now that the buffer is drained.
+  if (pulseGuardActive)
+  {
+    pulseGuardActive = false;
+    recoverLostPulses(pulseGuardT0, millis() - pulseGuardT0, totalPulses - pulseGuardP0);
+  }
+
   // Read Encoder
   myEnc.update();
 
@@ -1114,10 +1297,18 @@ void loop()
       // handled by Start/Stop
       break;
     case S_LOAD:
-      //load current song
-      loadSong(songList[currentSong]);
-      displaySongs();
-      state = S_SONG_LOADED;
+      // Defer the SD load until the encoder has settled. SdFat masks interrupts
+      // during SPI access, which destroys incoming SoftwareSerial clock bytes
+      // (~5% measured). Every lost pulse slides the beat grid permanently late,
+      // and only handleStart() ever re-anchors it - so a button start inherits
+      // the whole accumulated slip. Loading once per selection instead of once
+      // per detent cuts that by the number of songs scrolled past.
+      if ((millis() - timeLastEncoder) > songLoadSettleMs)
+      {
+        loadSong(songList[currentSong]);
+        displaySongs();
+        state = S_SONG_LOADED;
+      }
       break;
     case S_SONG_LOADED:
       //wait for start (handled by handleStart) or reload song if user input
@@ -1125,15 +1316,22 @@ void loop()
     case S_TEMPO_SET:
       break;
     case S_PRE_SONG:
-      if (currentPreQuarter >= waitForQuarters - 1)
+      if (updateCountdownDisplay)
+      {
+        Serial.print("\tStart in... ");
+        Serial.println(waitForQuarters - currentPreQuarter);
+        displayOnWait();
+        updateCountdownDisplay = false;
+      }
+      if (currentPreQuarter >= waitForQuarters)
       {
         Serial.println("Play");
         // prevent spurious stops after Play
         timeFromPlayStart = millis();
+        displayOnPlay();
         state = S_PLAYING;
         currentPreQuarter = 0;
         digitalWrite(beatSongLed, LOW);
-        displayOnPlay();
       }
       break;
     case S_PLAYING:
